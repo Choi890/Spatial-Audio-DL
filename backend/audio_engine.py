@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
+import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,9 +17,42 @@ import numpy as np
 import soundfile as sf
 
 
+def read_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return int(np.clip(value, minimum, maximum))
+
+
+def read_float_env(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return float(np.clip(value, minimum, maximum))
+
+
 ANALYSIS_SR = 22050
 MAX_BODY_BYTES = 420 * 1024 * 1024
 TARGET_TIMELINE_POINTS = 900
+ANALYSIS_PROFILE_VERSION = "fullband-neutral-v1"
+DEMUCS_CACHE_MAX_BYTES = 12 * 1024 * 1024 * 1024
+DEMUCS_CACHE_MAX_AGE_DAYS = 30
+DEMUCS_EXPECTED_STEM_COUNT = 4
+DEMUCS_QUALITY_PROFILE = "spatial-q2"
+DEMUCS_POSTPROCESS_VERSION = "softmask-v1"
+DEMUCS_SHIFTS = read_int_env("SPATIAL_DEMUCS_SHIFTS", 2, 1, 10)
+DEMUCS_OVERLAP = read_float_env("SPATIAL_DEMUCS_OVERLAP", 0.36, 0.1, 0.75)
+DEMUCS_SEGMENT_SECONDS = read_int_env("SPATIAL_DEMUCS_SEGMENT", 7, 4, 7)
+DEMUCS_JOBS = read_int_env("SPATIAL_DEMUCS_JOBS", 1, 1, max(1, min(4, os.cpu_count() or 1)))
+DEMUCS_STEM_IDS = frozenset({"vocals", "other", "drums", "bass"})
+STEM_MASK_FLOORS = {
+    "vocals": 0.16,
+    "other": 0.22,
+    "drums": 0.18,
+    "bass": 0.26,
+}
 
 
 @dataclass(frozen=True)
@@ -32,24 +69,23 @@ class Instrument:
 
 
 INSTRUMENTS: tuple[Instrument, ...] = (
-    Instrument("violins1", "제1바이올린", "strings", -3.7, 0.2, -1.35, 2300, 0.82, "#78a95d"),
-    Instrument("violins2", "제2바이올린", "strings", -2.15, 0.1, -1.75, 1600, 0.78, "#71a7c7"),
-    Instrument("violas", "비올라", "strings", -0.55, 0.05, -1.95, 820, 0.92, "#9a9a62"),
-    Instrument("cellos", "첼로", "strings", 1.35, 0.0, -1.7, 360, 0.95, "#d4a84d"),
-    Instrument("basses", "더블베이스", "strings", 3.2, 0.0, -1.35, 115, 0.9, "#a07058"),
-    Instrument("flute", "플루트", "woodwinds", -1.3, 0.15, -3.05, 3600, 0.7, "#a9c9a2"),
-    Instrument("oboe", "오보에", "woodwinds", -0.35, 0.12, -3.1, 1900, 0.8, "#d5bc75"),
-    Instrument("clarinet", "클라리넷", "woodwinds", 0.55, 0.08, -3.1, 1050, 0.82, "#77a36c"),
-    Instrument("bassoon", "바순", "woodwinds", 1.35, 0.05, -3.0, 420, 0.9, "#a67c52"),
-    Instrument("horn", "호른", "brass", -1.75, 0.35, -4.25, 520, 0.86, "#cfaa62"),
-    Instrument("trumpet", "트럼펫", "brass", 0.55, 0.45, -4.35, 2100, 0.75, "#e68355"),
-    Instrument("trombone", "트롬본", "brass", 1.65, 0.4, -4.45, 760, 0.82, "#c46b50"),
-    Instrument("timpani", "팀파니", "percussion", -2.85, 0.15, -5.05, 105, 0.92, "#955251"),
-    Instrument("percussion", "퍼커션", "percussion", 2.85, 0.55, -5.1, 4300, 0.72, "#d1795c"),
-    Instrument("harp", "하프", "plucked", -3.15, 0.25, -3.45, 3100, 0.62, "#f2b38f"),
-    Instrument("piano", "피아노", "keyboard", -2.35, 0.2, -3.7, 1250, 0.72, "#d6c4a0"),
+    Instrument("violins1", "1st Violins", "strings", -3.7, 0.2, -1.35, 2300, 0.82, "#78a95d"),
+    Instrument("violins2", "2nd Violins", "strings", -2.15, 0.1, -1.75, 1600, 0.78, "#71a7c7"),
+    Instrument("violas", "Violas", "strings", -0.55, 0.05, -1.95, 820, 0.92, "#9a9a62"),
+    Instrument("cellos", "Cellos", "strings", 1.35, 0.0, -1.7, 360, 0.95, "#d4a84d"),
+    Instrument("basses", "Double Basses", "strings", 3.2, 0.0, -1.35, 115, 0.9, "#a07058"),
+    Instrument("flute", "Flute", "woodwinds", -1.3, 0.15, -3.05, 3600, 0.7, "#a9c9a2"),
+    Instrument("oboe", "Oboe", "woodwinds", -0.35, 0.12, -3.1, 1900, 0.8, "#d5bc75"),
+    Instrument("clarinet", "Clarinet", "woodwinds", 0.55, 0.08, -3.1, 1050, 0.82, "#77a36c"),
+    Instrument("bassoon", "Bassoon", "woodwinds", 1.35, 0.05, -3.0, 420, 0.9, "#a67c52"),
+    Instrument("horn", "Horn", "brass", -1.75, 0.35, -4.25, 520, 0.86, "#cfaa62"),
+    Instrument("trumpet", "Trumpet", "brass", 0.55, 0.45, -4.35, 2100, 0.75, "#e68355"),
+    Instrument("trombone", "Trombone", "brass", 1.65, 0.4, -4.45, 760, 0.82, "#c46b50"),
+    Instrument("timpani", "Timpani", "percussion", -2.85, 0.15, -5.05, 105, 0.92, "#955251"),
+    Instrument("percussion", "Percussion", "percussion", 2.85, 0.55, -5.1, 4300, 0.72, "#d1795c"),
+    Instrument("harp", "Harp", "plucked", -3.15, 0.25, -3.45, 3100, 0.62, "#f2b38f"),
+    Instrument("piano", "Piano", "keyboard", -2.35, 0.2, -3.7, 1250, 0.72, "#d6c4a0"),
 )
-
 
 INSTRUMENT_BY_ID = {instrument.id: instrument for instrument in INSTRUMENTS}
 
@@ -225,6 +261,8 @@ def analyze_audio(
     job_id: str,
     output_dir: Path,
     request_demucs: bool = False,
+    demucs_model: str = "htdemucs_ft",
+    cache_key: str | None = None,
 ) -> dict[str, Any]:
     y, source_sr = load_audio(input_path)
     if y.ndim == 1:
@@ -270,14 +308,23 @@ def analyze_audio(
 
     active_ids = select_active_instruments(curves)
     waveform = make_waveform_preview(mono, 720)
-    mix = analyze_mix(mono, source_sr, rms, centroid, rolloff, flatness, zcr)
-    remaster = build_remaster_profile(mix, active_ids)
+    mix = analyze_mix(mono, source_sr, rms, centroid, rolloff, flatness, zcr, power=power, freqs=freqs)
+    stereo_image = build_stereo_image(y, source_sr, curves, n_fft=n_fft, hop_length=hop_length)
     key = estimate_key(chroma)
     sections = build_sections(times, rms, centroid, onset_env, curves, duration)
-    demucs = inspect_demucs(request_demucs, input_path, output_dir, job_id)
+    demucs = inspect_demucs(
+        request_demucs,
+        input_path,
+        output_dir,
+        job_id,
+        cache_key=cache_key,
+        model=demucs_model,
+    )
 
     return {
         "jobId": job_id,
+        "cacheKey": cache_key or job_id,
+        "analysisProfile": ANALYSIS_PROFILE_VERSION,
         "file": {
             "name": input_path.name,
             "sampleRate": int(source_sr),
@@ -290,7 +337,7 @@ def analyze_audio(
             "deepSeparator": demucs,
         "notes": [
             "NMF is kept as a fast fallback analysis path.",
-            "Demucs stems are preferred for spatial rendering when available.",
+            "Demucs stems use the spatial-q2 quality profile and soft-mask cleanup when available.",
         ],
         },
         "timeline": {
@@ -303,14 +350,19 @@ def analyze_audio(
         "tempo": {"bpm": round(tempo, 1), "confidence": estimate_tempo_confidence(onset_env)},
         "key": key,
         "mix": mix,
-        "remaster": remaster,
+        "stereoImage": stereo_image,
         "instruments": [
-            build_instrument_payload(instrument, curves[instrument.id], active_ids)
+            build_instrument_payload(
+                instrument,
+                curves[instrument.id],
+                active_ids,
+                stereo_image.get("instruments", {}).get(instrument.id),
+            )
             for instrument in INSTRUMENTS
         ],
         "activeIds": active_ids,
         "sections": sections,
-        "recommendations": build_recommendations(active_ids, mix, demucs, remaster),
+        "recommendations": build_clean_recommendations(active_ids, mix, demucs),
     }
 
 
@@ -560,6 +612,181 @@ def refine_instrument_curves(
     return refined
 
 
+def build_stereo_image(
+    samples: np.ndarray,
+    sample_rate: int,
+    curves: dict[str, np.ndarray],
+    *,
+    n_fft: int,
+    hop_length: int,
+) -> dict[str, Any]:
+    if samples.ndim != 2 or samples.shape[1] < 2:
+        return {
+            "status": "mono",
+            "pan": 0.0,
+            "width": 0.0,
+            "correlation": 1.0,
+            "confidence": 0.0,
+            "instruments": {},
+        }
+
+    left = np.nan_to_num(samples[:, 0].astype(np.float32, copy=False))
+    right = np.nan_to_num(samples[:, 1].astype(np.float32, copy=False))
+    if sample_rate != ANALYSIS_SR:
+        left = resample_linear(left, sample_rate, ANALYSIS_SR)
+        right = resample_linear(right, sample_rate, ANALYSIS_SR)
+    length = min(len(left), len(right))
+    if length <= 0:
+        return {
+            "status": "empty",
+            "pan": 0.0,
+            "width": 0.0,
+            "correlation": 1.0,
+            "confidence": 0.0,
+            "instruments": {},
+        }
+    left = left[:length]
+    right = right[:length]
+
+    left_mag = stft_magnitude(left, n_fft=n_fft, hop_length=hop_length)
+    right_mag = stft_magnitude(right, n_fft=n_fft, hop_length=hop_length)
+    frame_count = min(left_mag.shape[1], right_mag.shape[1])
+    if frame_count <= 0:
+        return {
+            "status": "empty",
+            "pan": 0.0,
+            "width": 0.0,
+            "correlation": 1.0,
+            "confidence": 0.0,
+            "instruments": {},
+        }
+
+    left_power = np.square(left_mag[:, :frame_count]).astype(np.float32)
+    right_power = np.square(right_mag[:, :frame_count]).astype(np.float32)
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / ANALYSIS_SR).astype(np.float32)
+    total_left = np.sum(left_power, axis=0)
+    total_right = np.sum(right_power, axis=0)
+    total_energy = total_left + total_right + 1e-12
+    global_pan_curve = smooth_signed_curve((total_right - total_left) / total_energy, sigma=0.78)
+
+    mid = (left + right) * 0.5
+    side = (left - right) * 0.5
+    mid_rms = float(np.sqrt(np.mean(mid * mid) + 1e-12))
+    side_rms = float(np.sqrt(np.mean(side * side) + 1e-12))
+    correlation = stereo_correlation(left, right)
+    global_width = clamp01(side_rms / max(mid_rms + side_rms, 1e-9))
+    global_pan = weighted_average(global_pan_curve, total_energy)
+    energy_reference = float(np.percentile(total_energy, 82) + 1e-9)
+
+    instruments: dict[str, Any] = {}
+    for instrument in INSTRUMENTS:
+        instruments[instrument.id] = estimate_instrument_stereo_image(
+            instrument,
+            curves[instrument.id],
+            left_power,
+            right_power,
+            freqs,
+            frame_count,
+            energy_reference,
+            global_width,
+        )
+
+    confidence = clamp01(
+        float(np.mean(np.clip(total_energy / energy_reference, 0, 1))) * 0.64
+        + min(abs(global_pan), 0.5) * 0.32
+        + global_width * 0.24
+    )
+    return {
+        "status": "stereo",
+        "pan": round(float(global_pan), 4),
+        "width": round(float(global_width), 4),
+        "correlation": round(float(correlation), 4),
+        "confidence": round(float(confidence), 4),
+        "instruments": instruments,
+    }
+
+
+def estimate_instrument_stereo_image(
+    instrument: Instrument,
+    curve: np.ndarray,
+    left_power: np.ndarray,
+    right_power: np.ndarray,
+    freqs: np.ndarray,
+    frame_count: int,
+    energy_reference: float,
+    global_width: float,
+) -> dict[str, Any]:
+    weights = stereo_frequency_weights(freqs, instrument)
+    left_band = np.sum(left_power * weights[:, None], axis=0)
+    right_band = np.sum(right_power * weights[:, None], axis=0)
+    band_energy = left_band + right_band + 1e-12
+    activity = resize_curve(curve, frame_count)
+    activity_weight = np.power(np.clip(activity, 0, 1), 1.35)
+    frame_weight = band_energy * (0.1 + activity_weight)
+    pan_curve = np.clip((right_band - left_band) / band_energy, -1, 1).astype(np.float32)
+    pan_curve = smooth_signed_curve(pan_curve, sigma=0.72)
+    pan = weighted_average(pan_curve, frame_weight)
+    energy_ratio = clamp01(float(np.mean(frame_weight) / max(energy_reference, 1e-9)) * 8.0)
+    activity_confidence = clamp01(float(np.percentile(activity, 86)) * 0.68 + float(np.mean(activity > 0.18)) * 0.32)
+    confidence = clamp01(activity_confidence * 0.52 + energy_ratio * 0.34 + min(abs(pan), 0.62) * 0.18)
+    width = clamp01(global_width * 0.48 + min(abs(pan), 1.0) * 0.34 + energy_ratio * 0.1)
+
+    return {
+        "pan": round(float(pan), 4),
+        "width": round(float(width), 4),
+        "confidence": round(float(confidence), 4),
+        "energy": round(float(energy_ratio), 4),
+        "panCurve": compress_series(pan_curve.tolist(), 4),
+    }
+
+
+def stereo_frequency_weights(freqs: np.ndarray, instrument: Instrument) -> np.ndarray:
+    center = max(float(instrument.freq), 30.0)
+    if instrument.id == "piano":
+        width = 0.96
+    elif instrument.family == "percussion":
+        width = 0.74
+    elif instrument.id in {"basses", "timpani"}:
+        width = 0.78
+    elif instrument.family in {"woodwinds", "brass"}:
+        width = 0.52
+    elif instrument.family == "strings":
+        width = 0.58
+    else:
+        width = 0.68
+    safe_freqs = np.maximum(freqs.astype(np.float32), 1.0)
+    weights = np.exp(-0.5 * (np.log(safe_freqs / center) / width) ** 2).astype(np.float32)
+    weights[freqs < 28] = 0
+    total = float(np.sum(weights) + 1e-9)
+    return weights / total
+
+
+def smooth_signed_curve(curve: np.ndarray, sigma: float) -> np.ndarray:
+    curve = np.nan_to_num(np.asarray(curve, dtype=np.float32))
+    if curve.size < 3:
+        return np.clip(curve, -1, 1).astype(np.float32)
+    return np.clip(smooth_curve(curve, sigma=sigma), -1, 1).astype(np.float32)
+
+
+def weighted_average(values: np.ndarray, weights: np.ndarray) -> float:
+    values = np.nan_to_num(np.asarray(values, dtype=np.float32))
+    weights = np.nan_to_num(np.maximum(np.asarray(weights, dtype=np.float32), 0))
+    total = float(np.sum(weights))
+    if total <= 1e-12 or values.size == 0:
+        return 0.0
+    return float(np.sum(values * weights) / total)
+
+
+def stereo_correlation(left: np.ndarray, right: np.ndarray) -> float:
+    length = min(len(left), len(right))
+    if length <= 1:
+        return 1.0
+    left = left[:length] - float(np.mean(left[:length]))
+    right = right[:length] - float(np.mean(right[:length]))
+    denom = math.sqrt(float(np.sum(left * left) * np.sum(right * right))) + 1e-12
+    return clamp_value(float(np.sum(left * right) / denom), -1.0, 1.0)
+
+
 def suppress_false_harp_from_strings(curves: dict[str, np.ndarray]) -> None:
     string_curve = np.maximum.reduce([curves["violins1"], curves["violins2"], curves["violas"], curves["cellos"]])
     strong_string = np.clip((string_curve - 0.34) / 0.48, 0, 1)
@@ -658,7 +885,12 @@ def select_active_instruments(curves: dict[str, np.ndarray]) -> list[str]:
     return active
 
 
-def build_instrument_payload(instrument: Instrument, curve: np.ndarray, active_ids: list[str]) -> dict[str, Any]:
+def build_instrument_payload(
+    instrument: Instrument,
+    curve: np.ndarray,
+    active_ids: list[str],
+    stereo: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     display_curve = make_display_curve(curve, active=instrument.id in active_ids)
     return {
         "id": instrument.id,
@@ -671,6 +903,7 @@ def build_instrument_payload(instrument: Instrument, curve: np.ndarray, active_i
         "position": {"x": instrument.x, "y": instrument.y, "z": instrument.z},
         "filter": {"freq": instrument.freq, "q": instrument.q},
         "color": instrument.color,
+        "stereo": stereo or {"pan": 0.0, "width": 0.0, "confidence": 0.0, "energy": 0.0, "panCurve": []},
         "curve": compress_series(curve.tolist(), 4),
         "displayCurve": compress_series(display_curve.tolist(), 4),
     }
@@ -699,6 +932,8 @@ def analyze_mix(
     rolloff: np.ndarray,
     flatness: np.ndarray,
     zcr: np.ndarray,
+    power: np.ndarray | None = None,
+    freqs: np.ndarray | None = None,
 ) -> dict[str, Any]:
     peak = float(np.max(np.abs(mono)) + 1e-9)
     rms_value = float(np.sqrt(np.mean(np.square(mono)) + 1e-12))
@@ -715,59 +950,70 @@ def analyze_mix(
         "flatness": round(float(np.mean(flatness)), 4),
         "zcr": round(float(np.mean(zcr)), 4),
         "sampleRate": int(sample_rate),
+        "spectralBalance": build_mix_spectral_balance(power, freqs),
     }
 
 
-def build_remaster_profile(mix: dict[str, Any], active_ids: list[str]) -> dict[str, Any]:
-    target_lufs = -16.0
-    requested_gain = clamp_value(target_lufs - float(mix["approxLufs"]), -4.5, 7.5)
-    peak_limited_gain = min(requested_gain, -1.2 - float(mix["peakDb"]))
-    input_gain = clamp_value(peak_limited_gain, -5.5, 6.0)
-    centroid = float(mix["centroidHz"])
-    flatness = float(mix["flatness"])
-    crest = float(mix["crestDb"])
-    clipping = float(mix["clippingPercent"])
+def build_mix_spectral_balance(power: np.ndarray | None, freqs: np.ndarray | None) -> dict[str, float]:
+    if power is None or freqs is None or power.size == 0 or freqs.size == 0:
+        return {
+            "sub": 0.0,
+            "bass": 0.0,
+            "lowMid": 0.0,
+            "coreMid": 0.0,
+            "upperMid": 0.0,
+            "mid": 0.0,
+            "presence": 0.0,
+            "air": 0.0,
+            "low": 0.0,
+            "body": 0.0,
+            "lowToBody": 0.0,
+            "bodyToHigh": 0.0,
+            "midToPresence": 0.0,
+            "fullRange": 0.0,
+        }
+    amplitude = np.sqrt(np.maximum(power, 0))
+    full_mask = (freqs >= 20) & (freqs <= min(20000, float(freqs[-1])))
+    frame_energy = np.sum(amplitude[full_mask], axis=0) + 1e-9
+    energy_reference = float(np.percentile(frame_energy, 78) + 1e-9)
+    frame_weights = np.clip(frame_energy / energy_reference, 0.18, 1.0)
+    frame_normalized = amplitude / frame_energy[None, :]
+    spectrum = np.average(frame_normalized, axis=1, weights=frame_weights)
+    full_range = float(np.sum(spectrum[full_mask]) + 1e-9)
 
-    low_shelf = clamp_value((1200 - centroid) / 1200 * 1.5, -1.5, 1.6)
-    low_mid = -1.1 if centroid < 950 and flatness < 0.13 else clamp_value((flatness - 0.18) * -2.8, -1.2, 0.8)
-    presence = clamp_value((1800 - centroid) / 1500 * 1.9, -2.0, 2.1)
-    air = clamp_value((2600 - centroid) / 2600 * 1.4 - max(0.0, flatness - 0.18) * 3.0, -2.4, 1.8)
-    deharsh = clamp_value(max(0.0, centroid - 2800) / 1600 * -1.8 - max(0.0, flatness - 0.16) * 2.2, -3.2, 0)
+    def share(low: float, high: float) -> float:
+        mask = (freqs >= low) & (freqs < high)
+        if not np.any(mask):
+            return 0.0
+        return float(np.sum(spectrum[mask]) / full_range)
 
-    compression_ratio = clamp_value(1.35 + max(0.0, crest - 10.5) * 0.11 + max(0.0, clipping) * 0.4, 1.25, 3.1)
-    threshold = clamp_value(-18.0 - max(0.0, crest - 10.0) * 0.8, -30.0, -14.0)
-    output_gain = -0.9 if clipping > 0 else -0.55
-
-    if "piano" in active_ids:
-        low_mid = min(low_mid, -0.25)
-        presence = max(presence, 0.35)
-    if any(item in active_ids for item in ("violins1", "violins2", "violas")):
-        deharsh = min(deharsh, -0.45)
-        air = min(air, 1.1)
-
+    sub = share(20, 60)
+    bass = share(60, 180)
+    low_mid = share(180, 500)
+    core_mid = share(500, 1200)
+    upper_mid = share(1200, 2400)
+    mid = core_mid + upper_mid
+    presence = share(2400, 6000)
+    air = share(6000, 20000)
+    low = sub + bass
+    body = low_mid + mid
+    low_to_body = low / max(body, 1e-9)
+    body_to_high = body / max(presence + air, 1e-9)
     return {
-        "enabled": True,
-        "targetLufs": target_lufs,
-        "inputGainDb": round(input_gain, 2),
-        "lowShelfDb": round(low_shelf, 2),
-        "lowMidDb": round(low_mid, 2),
-        "presenceDb": round(presence, 2),
-        "airDb": round(air, 2),
-        "deharshDb": round(deharsh, 2),
-        "compressor": {
-            "thresholdDb": round(threshold, 2),
-            "ratio": round(compression_ratio, 2),
-            "attack": 0.008,
-            "release": 0.16,
-        },
-        "outputGainDb": round(output_gain, 2),
-        "summary": "피크 헤드룸, 중심 주파수, 평탄도, 크레스트를 기반으로 과하지 않은 자동 보정을 적용합니다.",
-        "rows": [
-            {"label": "Loudness", "value": f"{round(input_gain, 2)} dB input"},
-            {"label": "Tone", "value": f"low {round(low_shelf, 2)} / presence {round(presence, 2)} / air {round(air, 2)} dB"},
-            {"label": "De-harsh", "value": f"{round(deharsh, 2)} dB"},
-            {"label": "Glue", "value": f"{round(compression_ratio, 2)}:1 @ {round(threshold, 2)} dB"},
-        ],
+        "sub": round(sub, 5),
+        "bass": round(bass, 5),
+        "lowMid": round(low_mid, 5),
+        "coreMid": round(core_mid, 5),
+        "upperMid": round(upper_mid, 5),
+        "mid": round(mid, 5),
+        "presence": round(presence, 5),
+        "air": round(air, 5),
+        "low": round(low, 5),
+        "body": round(body, 5),
+        "lowToBody": round(low_to_body, 5),
+        "bodyToHigh": round(body_to_high, 5),
+        "midToPresence": round(body_to_high, 5),
+        "fullRange": round(float(np.sum(spectrum[full_mask]) / full_range), 5),
     }
 
 
@@ -828,29 +1074,87 @@ def build_sections(
     return sections
 
 
-def inspect_demucs(requested: bool, input_path: Path, output_dir: Path, job_id: str) -> dict[str, Any]:
+def inspect_demucs(
+    requested: bool,
+    input_path: Path,
+    output_dir: Path,
+    job_id: str,
+    *,
+    cache_key: str | None = None,
+    model: str = "htdemucs_ft",
+) -> dict[str, Any]:
+    allowed_models = {
+        "htdemucs_ft": "Hybrid Transformer Demucs fine-tuned",
+    }
+    model_name = "htdemucs_ft"
     module_found = importlib.util.find_spec("demucs") is not None
     command_found = shutil.which("demucs") is not None
     available = module_found or command_found
+    device = detect_demucs_device()
+    settings = {
+        "profile": DEMUCS_QUALITY_PROFILE,
+        "postprocess": DEMUCS_POSTPROCESS_VERSION,
+        "device": device,
+        "shifts": DEMUCS_SHIFTS,
+        "overlap": round(DEMUCS_OVERLAP, 3),
+        "segment": DEMUCS_SEGMENT_SECONDS,
+        "jobs": DEMUCS_JOBS,
+    }
     payload: dict[str, Any] = {
-        "name": "Demucs / Hybrid Transformer Demucs",
+        "name": f"Demucs / {allowed_models[model_name]}",
+        "model": model_name,
+        "qualityProfile": DEMUCS_QUALITY_PROFILE,
+        "postprocess": DEMUCS_POSTPROCESS_VERSION,
+        "settings": settings,
         "available": available,
         "requested": requested,
         "status": "ready" if available else "not-installed",
+        "cached": False,
         "stems": [],
+        "stemQuality": {},
     }
-    if not available or not requested:
+    if not requested:
         return payload
 
-    stem_root = output_dir / job_id / "demucs"
+    cache_source = (
+        f"{model_name}_{DEMUCS_QUALITY_PROFILE}_{DEMUCS_POSTPROCESS_VERSION}"
+        f"_s{DEMUCS_SHIFTS}_o{DEMUCS_OVERLAP:.2f}_{cache_key}"
+    ) if cache_key else ""
+    cache_id = re.sub(r"[^A-Za-z0-9_-]+", "", cache_source)[:48]
+    cache_root = output_dir / "_cache" / "demucs"
+    stem_root = cache_root / cache_id if cache_id else output_dir / job_id / "demucs"
+    prune_demucs_cache(cache_root, keep=stem_root if cache_id else None)
+    cached_stems = sorted(stem_root.rglob("*.wav"))
+    if len(cached_stems) >= DEMUCS_EXPECTED_STEM_COUNT:
+        touch_cache_entry(stem_root)
+        payload["status"] = "completed"
+        payload["cached"] = True
+        payload["stems"] = [str(path.relative_to(output_dir)).replace("\\", "/") for path in cached_stems]
+        payload["stemQuality"] = read_stem_quality(stem_root)
+        return payload
+    if not available:
+        return payload
+
     stem_root.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
         "-m",
         "demucs.separate",
         "-n",
-        "htdemucs",
+        model_name,
+        "--device",
+        device,
+        "--shifts",
+        str(DEMUCS_SHIFTS),
+        "--overlap",
+        f"{DEMUCS_OVERLAP:.3f}",
+        "--segment",
+        str(DEMUCS_SEGMENT_SECONDS),
+        "-j",
+        str(DEMUCS_JOBS),
         "--float32",
+        "--clip-mode",
+        "rescale",
         "--out",
         str(stem_root),
         str(input_path),
@@ -858,30 +1162,317 @@ def inspect_demucs(requested: bool, input_path: Path, output_dir: Path, job_id: 
     try:
         subprocess.run(command, check=True, capture_output=True, text=True, timeout=900)
         stems = sorted(stem_root.rglob("*.wav"))
+        stem_quality = enhance_demucs_stems(stems, stem_root)
         payload["status"] = "completed"
+        payload["cached"] = False
         payload["stems"] = [str(path.relative_to(output_dir)).replace("\\", "/") for path in stems]
+        payload["stemQuality"] = stem_quality
+        if cache_id:
+            touch_cache_entry(stem_root)
+            prune_demucs_cache(cache_root, keep=stem_root)
+    except subprocess.CalledProcessError as exc:  # Demucs failures should not break the analysis app.
+        payload["status"] = "failed"
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        payload["reason"] = stderr or stdout or str(exc)
     except Exception as exc:  # Demucs failures should not break the analysis app.
         payload["status"] = "failed"
         payload["reason"] = str(exc)
     return payload
 
 
-def build_recommendations(
+def detect_demucs_device() -> str:
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
+def read_stem_quality(stem_root: Path) -> dict[str, Any]:
+    quality_path = stem_root / "stem_quality.json"
+    if not quality_path.exists():
+        return {}
+    try:
+        payload = json.loads(quality_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in payload.items()
+        if key in DEMUCS_STEM_IDS and isinstance(value, dict)
+    }
+
+
+def write_stem_quality(stem_root: Path, quality: dict[str, Any]) -> None:
+    try:
+        (stem_root / "stem_quality.json").write_text(
+            json.dumps(quality, ensure_ascii=True, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def enhance_demucs_stems(stem_paths: list[Path], stem_root: Path) -> dict[str, Any]:
+    loaded: list[dict[str, Any]] = []
+    for path in stem_paths:
+        stem_id = get_stem_id_from_path(path)
+        if stem_id not in DEMUCS_STEM_IDS:
+            continue
+        try:
+            data, sample_rate = sf.read(str(path), always_2d=True, dtype="float32")
+        except Exception:
+            continue
+        if data.size == 0:
+            continue
+        loaded.append({
+            "id": stem_id,
+            "path": path,
+            "data": np.nan_to_num(data.astype(np.float32, copy=False)),
+            "sample_rate": int(sample_rate),
+        })
+
+    if len(loaded) < DEMUCS_EXPECTED_STEM_COUNT:
+        return {}
+
+    reference_sr = loaded[0]["sample_rate"]
+    if any(item["sample_rate"] != reference_sr for item in loaded):
+        return {}
+
+    frame_size = int(np.clip(round(reference_sr * 0.046), 1024, 4096))
+    hop = max(256, frame_size // 2)
+    curves = []
+    for item in loaded:
+        mono = np.mean(item["data"], axis=1)
+        curves.append(stem_frame_rms(mono, frame_size, hop))
+    common_frames = min((len(curve) for curve in curves), default=0)
+    if common_frames <= 1:
+        return {}
+
+    matrix = np.vstack([curve[:common_frames] for curve in curves]).astype(np.float32)
+    max_curve = np.max(matrix, axis=0) + 1e-8
+    total_curve = np.sum(matrix, axis=0) + 1e-8
+    quality: dict[str, Any] = {}
+
+    for index, item in enumerate(loaded):
+        stem_id = item["id"]
+        data = item["data"]
+        curve = matrix[index]
+        before_rms = rms_float(data)
+        dominance = np.clip(curve / max_curve, 0, 1)
+        share = np.clip(curve / total_curve, 0, 1)
+        activity_ref = float(np.percentile(curve, 92) + 1e-8)
+        activity = np.clip(curve / activity_ref, 0, 1.4)
+        floor = STEM_MASK_FLOORS.get(stem_id, 0.2)
+        clarity = (
+            np.clip((dominance - 0.18) / 0.76, 0, 1) * 0.72
+            + np.clip((share - 0.08) / 0.5, 0, 1) * 0.28
+        )
+        activity_gate = 0.48 + 0.52 * np.clip(activity * 1.18, 0, 1)
+        target_mask = np.clip((floor + (1.0 - floor) * clarity) * activity_gate, 0.06, 1.0)
+        smooth_mask = smooth_envelope(target_mask, attack=0.34, release=0.18)
+        sample_mask = resample_mask(smooth_mask, len(data), hop)
+        enhanced = data * sample_mask[:, None]
+        enhanced = remove_dc_and_apply_fade(enhanced, reference_sr)
+        peak = float(np.max(np.abs(enhanced)) + 1e-9)
+        if peak > 0.995:
+            enhanced *= np.float32(0.995 / peak)
+        try:
+            sf.write(str(item["path"]), enhanced, reference_sr, subtype="FLOAT")
+        except Exception:
+            enhanced = data
+
+        after_rms = rms_float(enhanced)
+        mask_mean = float(np.mean(smooth_mask))
+        dominance_mean = float(np.mean(dominance))
+        retention = float(after_rms / (before_rms + 1e-9))
+        separation = float(np.clip(mask_mean * 0.56 + dominance_mean * 0.44, 0, 1))
+        spatial_weight = float(np.clip(0.72 + separation * 0.34 + min(0.2, retention) * 0.1, 0.62, 1.08))
+        quality[stem_id] = {
+            "rmsDb": round(linear_to_db(after_rms), 2),
+            "peakDb": round(linear_to_db(float(np.max(np.abs(enhanced)) + 1e-9)), 2),
+            "activity": round(float(np.mean(activity > 0.08)), 4),
+            "dominance": round(dominance_mean, 4),
+            "separation": round(separation, 4),
+            "retention": round(float(np.clip(retention, 0, 1.5)), 4),
+            "spatialWeight": round(spatial_weight, 4),
+        }
+
+    write_stem_quality(stem_root, quality)
+    return quality
+
+
+def get_stem_id_from_path(path: Path) -> str:
+    return path.stem.lower()
+
+
+def stem_frame_rms(samples: np.ndarray, frame_size: int, hop: int) -> np.ndarray:
+    samples = np.asarray(samples, dtype=np.float32)
+    if samples.size == 0:
+        return np.zeros(1, dtype=np.float32)
+    padded = np.pad(samples, (frame_size // 2, frame_size // 2), mode="constant")
+    frame_count = max(1, 1 + (len(padded) - frame_size) // hop)
+    values = np.zeros(frame_count, dtype=np.float32)
+    for index in range(frame_count):
+        frame = padded[index * hop : index * hop + frame_size]
+        values[index] = float(np.sqrt(np.mean(frame * frame) + 1e-12))
+    return values
+
+
+def smooth_envelope(values: np.ndarray, *, attack: float, release: float) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    if values.size == 0:
+        return values
+    output = np.zeros_like(values)
+    output[0] = values[0]
+    for index in range(1, len(values)):
+        coeff = attack if values[index] >= output[index - 1] else release
+        output[index] = output[index - 1] * (1.0 - coeff) + values[index] * coeff
+    return np.clip(output, 0, 1)
+
+
+def resample_mask(mask: np.ndarray, sample_count: int, hop: int) -> np.ndarray:
+    if sample_count <= 0:
+        return np.zeros(0, dtype=np.float32)
+    if mask.size <= 1:
+        value = float(mask[0]) if mask.size else 1.0
+        return np.full(sample_count, value, dtype=np.float32)
+    x_old = np.arange(mask.size, dtype=np.float32) * hop
+    x_new = np.arange(sample_count, dtype=np.float32)
+    return np.interp(x_new, x_old, mask, left=mask[0], right=mask[-1]).astype(np.float32)
+
+
+def remove_dc_and_apply_fade(data: np.ndarray, sample_rate: int) -> np.ndarray:
+    output = np.asarray(data, dtype=np.float32).copy()
+    if output.size == 0:
+        return output
+    output -= np.mean(output, axis=0, keepdims=True)
+    fade_len = min(max(2, int(sample_rate * 0.006)), len(output), 2048)
+    if fade_len > 1:
+        fade = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+        output[:fade_len] *= fade[:, None]
+        output[-fade_len:] *= fade[::-1, None]
+    return np.nan_to_num(output)
+
+
+def rms_float(data: np.ndarray) -> float:
+    data = np.asarray(data, dtype=np.float32)
+    if data.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(data * data) + 1e-12))
+
+
+def linear_to_db(value: float) -> float:
+    return float(20.0 * math.log10(max(value, 1e-9)))
+
+
+def touch_cache_entry(path: Path) -> None:
+    now = time.time()
+    for item in [path, *path.rglob("*")]:
+        try:
+            os.utime(item, (now, now))
+        except OSError:
+            pass
+
+
+def prune_demucs_cache(cache_root: Path, keep: Path | None = None) -> None:
+    if not cache_root.exists():
+        return
+    try:
+        root = cache_root.resolve()
+    except Exception:
+        return
+    keep_resolved = None
+    if keep is not None:
+        try:
+            keep_resolved = keep.resolve()
+        except Exception:
+            keep_resolved = None
+
+    entries: list[tuple[Path, int, float]] = []
+    now = time.time()
+    max_age = DEMUCS_CACHE_MAX_AGE_DAYS * 24 * 60 * 60
+    for entry in cache_root.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            resolved = entry.resolve()
+        except Exception:
+            continue
+        if keep_resolved is not None and resolved == keep_resolved:
+            continue
+        if not is_relative_to(resolved, root):
+            continue
+        size, last_used = cache_entry_stats(entry)
+        entries.append((entry, size, last_used))
+
+    for entry, _size, last_used in list(entries):
+        if now - last_used > max_age:
+            safe_remove_cache_entry(entry, root)
+    entries = [(entry, *cache_entry_stats(entry)) for entry, _size, _last in entries if entry.exists()]
+    total = sum(size for _entry, size, _last in entries)
+    for entry, size, _last_used in sorted(entries, key=lambda item: item[2]):
+        if total <= DEMUCS_CACHE_MAX_BYTES:
+            break
+        safe_remove_cache_entry(entry, root)
+        total -= size
+
+
+def cache_entry_stats(path: Path) -> tuple[int, float]:
+    size = 0
+    last_used = 0.0
+    for item in path.rglob("*"):
+        try:
+            stat = item.stat()
+        except OSError:
+            continue
+        if item.is_file():
+            size += stat.st_size
+        last_used = max(last_used, stat.st_mtime)
+    try:
+        last_used = max(last_used, path.stat().st_mtime)
+    except OSError:
+        pass
+    return size, last_used
+
+
+def safe_remove_cache_entry(path: Path, root: Path) -> None:
+    try:
+        resolved = path.resolve()
+    except Exception:
+        return
+    if resolved == root or not is_relative_to(resolved, root):
+        return
+    shutil.rmtree(resolved, ignore_errors=True)
+
+
+def is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def build_clean_recommendations(
     active_ids: list[str],
     mix: dict[str, Any],
     demucs: dict[str, Any],
-    remaster: dict[str, Any],
 ) -> list[str]:
     items: list[str] = []
     if "piano" in active_ids:
-        items.append("피아노가 감지되어 빠른 어택과 넓은 대역을 보존하는 짧은 릴리즈 게인을 적용합니다.")
+        items.append("피아노가 감지되어 빠른 어택과 넓은 잔향이 과장되지 않도록 릴리즈와 저중역을 보정합니다.")
     if any(item in active_ids for item in ("violins1", "violins2", "violas", "cellos")):
         items.append("현악군은 스타카토와 지속 보잉을 분리해 하프/피아노 오탐을 억제합니다.")
     if mix["peakDb"] > -0.5:
-        items.append("원본 피크가 높아 공간 렌더링에서 자동 헤드룸을 유지하는 편이 좋습니다.")
-    if abs(float(remaster["inputGainDb"])) > 0.6 or abs(float(remaster["presenceDb"])) > 0.8:
-        items.append("자동 리마스터링은 라우드니스와 톤 밸런스를 소폭 보정하도록 설정되었습니다.")
-    if not demucs["available"]:
+        items.append("원본 피크가 높으므로 재설계 단계에서 클리핑 여유를 별도로 확인하는 편이 좋습니다.")
+    if demucs.get("cached"):
+        items.append("이 곡은 Demucs stem 캐시를 재사용해 분석 시간을 줄였습니다.")
+    elif not demucs["available"]:
         items.append("Demucs를 설치하면 실제 딥러닝 stem 분리 결과를 공간 렌더링에 사용할 수 있습니다.")
     return items[:4]
 

@@ -4,10 +4,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="Demucs stem 분리와 Web Audio HRTF 렌더링을 결합한 로컬 공간음향 스튜디오" />
+  <meta name="description" content="공간음향 재설계를 위해 기존 공간 DSP를 제거한 로컬 분석 스튜디오" />
   <title>Spatial Audio NEW</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="styles.css?v=20260521-top-card-compact" />
 </head>
 
 <body>
@@ -17,11 +17,12 @@
         <span class="brand-mark" aria-hidden="true"></span>
         <span>
           <strong>Spatial Audio NEW</strong>
-          <small>Demucs HRTF spatial studio</small>
+          <small>spatial reset studio</small>
         </span>
       </a>
       <div class="top-actions">
-        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="다크 모드로 전환" aria-pressed="false">
+        <button class="perf-toggle" id="perf-toggle" type="button" aria-label="성능 패널 열기" aria-expanded="false">Perf</button>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="테마 전환" aria-pressed="false">
           <span class="theme-toggle-mark" aria-hidden="true"></span>
           <span id="theme-toggle-text">Dark</span>
         </button>
@@ -35,19 +36,21 @@
     <section class="studio-grid" id="top">
       <section class="upload-panel" id="drop-zone" aria-label="음악 업로드">
         <div class="upload-copy">
-          <p class="eyebrow">LOCAL AI SPATIAL ENGINE</p>
+          <p class="eyebrow">SPATIAL ENGINE RESET</p>
           <h1>Spatial Audio Studio</h1>
-          <p>Demucs로 분리한 lead, music, transient, low stem을 각각 HRTF, 초기반사, 룸 컨볼루션, 자동 리마스터 체인에 태워 더 안정적인 공간감을 만듭니다.</p>
+          <p></p>
         </div>
-        <div class="upload-actions">
-          <label class="primary-button" for="audio-file">음악 선택</label>
-          <button class="ghost-button" id="reset-button" type="button">초기화</button>
+        <div class="upload-control-stack">
+          <div class="upload-actions">
+            <label class="primary-button" for="audio-file">음악 선택</label>
+            <button class="ghost-button" id="reset-button" type="button">초기화</button>
+          </div>
+          <div class="deep-toggle">
+            <span>Demucs stem 분리 자동 적용</span>
+            <em>처음 실행할 때는 모델 다운로드 때문에 시간이 걸릴 수 있습니다. 이후 같은 곡은 fine-tuned 캐시를 재사용합니다.</em>
+          </div>
         </div>
         <input id="audio-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.opus,.webm" />
-        <div class="deep-toggle">
-          <span>Demucs stem 분리 자동 적용</span>
-          <em>첫 실행은 모델 가중치 다운로드로 오래 걸릴 수 있습니다.</em>
-        </div>
         <div class="format-row">
           <span>MP3</span>
           <span>WAV</span>
@@ -62,7 +65,7 @@
         <div class="track-header">
           <p id="track-kicker">READY</p>
           <h2 id="track-name">파일을 선택하세요</h2>
-          <p id="track-subtitle">로컬 백엔드에서 stem을 분리하고 브라우저에서 공간 렌더링합니다.</p>
+          <p id="track-subtitle">로컬 백엔드에서 분석하고 브라우저에서는 원본 출력 기준선을 유지합니다.</p>
         </div>
 
         <div class="mode-toggle" role="group" aria-label="렌더링 모드">
@@ -82,38 +85,36 @@
           </div>
         </div>
 
-        <div class="control-grid">
-          <label>
-            <span>폭</span>
-            <input id="width-slider" type="range" min="70" max="180" value="145" />
-            <b id="width-value">145%</b>
-          </label>
-          <label>
-            <span>깊이</span>
-            <input id="depth-slider" type="range" min="70" max="190" value="162" />
-            <b id="depth-value">162%</b>
-          </label>
-          <label>
-            <span>룸</span>
-            <input id="room-slider" type="range" min="0" max="90" value="58" />
-            <b id="room-value">58%</b>
-          </label>
-          <label>
-            <span>출력</span>
-            <input id="gain-slider" type="range" min="35" max="100" value="100" />
-            <b id="gain-value">100%</b>
-          </label>
-          <label class="switch-control">
-            <span>자동 리마스터</span>
-            <input id="remaster-toggle" type="checkbox" checked />
-            <b id="remaster-value">ON</b>
-          </label>
-          <label class="switch-control">
-            <span>콘서트홀</span>
-            <input id="concert-hall-toggle" type="checkbox" />
-            <b id="concert-hall-value">OFF</b>
-          </label>
+        <div class="spatial-engine-module" aria-label="Spatial engine controls">
+          <div class="spatial-engine-summary">
+            <div>
+              <p class="panel-kicker">SPATIAL ENGINE</p>
+              <strong id="spatial-engine-mode">Original overlay renderer</strong>
+            </div>
+            <span id="spatial-engine-status">Auto analysis FIR field</span>
+          </div>
+          <div class="spatial-engine-flags" aria-label="Spatial processing stages">
+            <span>Dry lock</span>
+            <span>Mix overlay</span>
+            <span>FIR HRTF</span>
+            <span>Front-wide field</span>
+          </div>
+          <div class="spatial-auto-grid" aria-label="Automatic spatial analysis values">
+            <div class="spatial-auto-metric">
+              <span>Wet layer</span>
+              <strong id="spatial-wet-value">28%</strong>
+            </div>
+            <div class="spatial-auto-metric">
+              <span>Stage radius</span>
+              <strong id="spatial-radius-value">72%</strong>
+            </div>
+            <div class="spatial-auto-metric">
+              <span>Reflections</span>
+              <strong id="spatial-reflection-value">38%</strong>
+            </div>
+          </div>
         </div>
+
       </section>
     </section>
 
@@ -154,12 +155,12 @@
       <article class="panel stage-panel">
         <div class="panel-heading">
           <div>
-            <p class="panel-kicker">SPATIAL FIELD</p>
-            <h2>AI 공간음향 필드</h2>
+            <p class="panel-kicker">ANALYSIS FIELD</p>
+            <h2>오디오 분석 필드</h2>
           </div>
           <span id="active-count">0 stems</span>
         </div>
-        <div class="stage-map" id="stage-map" aria-label="공간음향 위치 지도"></div>
+        <div class="stage-map" id="stage-map" aria-label="오디오 분석 지도"></div>
       </article>
 
       <article class="panel instrument-panel">
@@ -174,8 +175,32 @@
       </article>
     </section>
 
-    <section class="analysis-grid bottom">
-      <article class="panel">
+    <section class="analysis-grid bottom spectrum-row">
+      <article class="panel spectrum-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-kicker">SPECTRUM BANDS</p>
+            <h2>스펙트럼 밴드 뷰</h2>
+          </div>
+          <span id="spectrum-status">Low-load analyser</span>
+        </div>
+        <div class="spectrum-scene" id="spectrum-scene" aria-label="Low-load live frequency band view">
+          <canvas id="spectrum-canvas" width="1200" height="300"></canvas>
+          <div class="spectrum-axis" aria-hidden="true">
+            <span>20</span>
+            <span>60</span>
+            <span>250</span>
+            <span>1k</span>
+            <span>4k</span>
+            <span>12k</span>
+            <span>20k</span>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="analysis-grid bottom waveform-row">
+      <article class="panel waveform-panel">
         <div class="panel-heading">
           <div>
             <p class="panel-kicker">AUDIO MAP</p>
@@ -183,70 +208,71 @@
           </div>
           <span id="waveform-tag">대기</span>
         </div>
-        <canvas id="waveform-canvas" height="180"></canvas>
-      </article>
-
-      <article class="panel">
-        <div class="panel-heading">
-          <div>
-            <p class="panel-kicker">AUTO REMASTER</p>
-            <h2>자동 리마스터링</h2>
-          </div>
-          <span id="remaster-tag">대기</span>
-        </div>
-        <div class="remaster-controls">
-          <label>
-            <span>강도</span>
-            <input id="remaster-amount-slider" type="range" min="0" max="100" value="82" />
-            <b id="remaster-amount-value">82%</b>
-          </label>
-          <label>
-            <span>톤</span>
-            <input id="remaster-tone-slider" type="range" min="-50" max="50" value="0" />
-            <b id="remaster-tone-value">0</b>
-          </label>
-          <label>
-            <span>명료도</span>
-            <input id="remaster-clarity-slider" type="range" min="0" max="100" value="64" />
-            <b id="remaster-clarity-value">64%</b>
-          </label>
-          <label>
-            <span>헤드룸</span>
-            <input id="remaster-headroom-slider" type="range" min="0" max="100" value="62" />
-            <b id="remaster-headroom-value">62%</b>
-          </label>
-        </div>
-        <div class="remaster-grid" id="remaster-grid"></div>
+        <canvas id="waveform-canvas" height="150"></canvas>
       </article>
     </section>
 
-    <section class="analysis-grid bottom">
-      <article class="panel">
+    <section class="analysis-grid bottom detail-row">
+      <article class="panel model-panel">
         <div class="panel-heading">
           <div>
             <p class="panel-kicker">MODEL STACK</p>
-            <h2>공간음향 엔진 상태</h2>
+            <h2>재설계 엔진 상태</h2>
           </div>
           <span id="model-tag">대기</span>
         </div>
         <div class="model-stack" id="model-stack"></div>
       </article>
-    </section>
 
-    <section class="panel section-panel">
-      <div class="panel-heading">
-        <div>
-          <p class="panel-kicker">STRUCTURE</p>
-          <h2>구간별 에너지</h2>
+      <article class="panel section-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-kicker">STRUCTURE</p>
+            <h2>구간별 에너지</h2>
+          </div>
+          <span id="section-tag">8 sections</span>
         </div>
-        <span id="section-tag">8 sections</span>
-      </div>
-      <div class="section-list" id="section-list"></div>
+        <div class="section-list" id="section-list"></div>
+      </article>
     </section>
   </main>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js"></script>
+  <aside class="perf-panel" id="perf-panel" aria-label="성능 디버그 패널" hidden>
+    <div class="perf-panel-header">
+      <strong>Performance</strong>
+      <button id="perf-close" type="button" aria-label="성능 패널 닫기">×</button>
+    </div>
+    <dl>
+      <div>
+        <dt>FPS</dt>
+        <dd id="perf-fps">--</dd>
+      </div>
+      <div>
+        <dt>Frame</dt>
+        <dd id="perf-frame">-- ms</dd>
+      </div>
+      <div>
+        <dt>Meters</dt>
+        <dd id="perf-meter">-- ms</dd>
+      </div>
+      <div>
+        <dt>Waveform</dt>
+        <dd id="perf-waveform">-- ms</dd>
+      </div>
+      <div>
+        <dt>Nodes</dt>
+        <dd id="perf-nodes">0</dd>
+      </div>
+      <div>
+        <dt>Heap</dt>
+        <dd id="perf-heap">--</dd>
+      </div>
+    </dl>
+  </aside>
+  <script src="js/config.js?v=20260522-original-overlay"></script>
+  <script src="js/utils.js?v=20260522-original-overlay"></script>
+  <script src="app.js?v=20260522-original-overlay"></script>
 </body>
 
 </html>

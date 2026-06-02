@@ -1,6 +1,13 @@
 __pycache__/
 *.pyc
+node_modules/
+test-results/
+playwright-report/
 data/uploads/*
 data/outputs/*
+data/vendor/*
+data/brir/*
+data/logs/*
 !data/uploads/.gitkeep
 !data/outputs/.gitkeep
+!data/brir/.gitkeep

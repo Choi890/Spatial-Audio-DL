@@ -1,4 +1,152 @@
-const $ = (selector) => document.querySelector(selector);
+const {
+  $,
+  apiPath,
+  clamp,
+  cssColor,
+  dbToGain,
+  escapeHtml,
+  formatBytes,
+  formatNumber,
+  formatTime,
+  mapRange,
+  setStyleProperty,
+  setText,
+  toggleClass
+} = window.SpatialAudioUtils;
+
+const {
+  LIVE_SIGNATURES,
+  METER_FRAME_INTERVAL,
+  SHORT_NAMES,
+  STEM_ORDER,
+  STEM_PROFILES
+} = window.SpatialAudioConfig;
+
+const SPECTRUM_BAR_COUNT = 24;
+const LIVE_ANALYSER_FFT_SIZE = 2048;
+const STEM_METER_FFT_SIZE = 512;
+const VISUAL_FRAME_INTERVAL = 1 / 60;
+const HIDDEN_VISUAL_FRAME_INTERVAL = 1 / 60;
+const METER_STYLE_EPSILON = 0.012;
+const STEM_BAR_NORMAL_CEILING = 0.88;
+const STEM_BAR_RESPONSE_CURVE = 3.0;
+const STEM_BAR_PEAK_GATE = 0.9997;
+const STEM_BAR_PEAK_EXPONENT = 6;
+const DEMUCS_MODEL = "htdemucs_ft";
+const SPATIAL_SPACE_MULTIPLIER = 5.5;  //값이 커질수록 “머리 밖으로 펼쳐지는 느낌”이 강해지지만, 너무 크면 인위적인 공간감, 위상감, 지연감이 생길 수 있다.
+const SPATIAL_WIDTH_MULTIPLIER = 7;  //좌우 폭을 키우는 핵심 값
+const SPATIAL_ENVELOPMENT_SCALE = 5.1;  //소리가 몸 주변을 감싸는 느낌
+const SPATIAL_DISTANCE_ENVELOPMENT = 10;  //값이 커질수록 소리가 귀 바로 옆이 아니라 더 먼 공간에서 펼쳐지는 느낌
+const SPATIAL_SIDE_ENERGY_SCALE = 4.5;  //측면 에너지를 조절하는 값 
+const SPATIAL_FIRST_WET_SCALE = 1; //첫 번째 반사음의 wet 값을 조절하는 값. 1보다 크면 첫 번째 반사음이 더 강해져서 공간감이 증가하지만, 너무 크면 부자연스러움
+const SPATIAL_NATURAL_DELAY_SCALE = 1;  
+const SPATIAL_NATURAL_MOTION_SCALE = 0.16;   
+const SPATIAL_NATURAL_PAN_SCALE = 1.3;
+const SPATIAL_NATURAL_CUE_SCALE = 1;
+const SPATIAL_FRONT_HEMISPHERE_AZIMUTH_LIMIT = 96;
+const SPATIAL_MAX_RENDER_AZIMUTH = 158;
+const SPATIAL_ENGINE_DEFAULTS = {
+  wet: 0.72,
+  radius: 3,
+  reflections: 0.56
+};
+const SPATIAL_CENTER_STAGE_DIRECTIONS = [
+  { id: "stageAnchor", azimuth: 0, elevation: 10, distance: 4.8, gain: 0.01, delay: 0.0065 },
+  { id: "stageEarlyLeft", azimuth: -68, elevation: 14, distance: 6.45, gain: 0.054, delay: 0.0112 },
+  { id: "stageEarlyRight", azimuth: 68, elevation: 14, distance: 6.45, gain: 0.054, delay: 0.0116 },
+  { id: "stageWallLeft", azimuth: -106, elevation: 17, distance: 8.3, gain: 0.054, delay: 0.0168 },
+  { id: "stageWallRight", azimuth: 106, elevation: 17, distance: 8.3, gain: 0.054, delay: 0.0172 },
+  { id: "stageOuterLeft", azimuth: -132, elevation: 18, distance: 9.0, gain: 0.016, delay: 0.0215 },
+  { id: "stageOuterRight", azimuth: 132, elevation: 18, distance: 9.0, gain: 0.016, delay: 0.0219 },
+  { id: "stageCeiling", azimuth: 10, elevation: 62, distance: 7.9, gain: 0.018, delay: 0.022 }
+];
+const SPATIAL_FIELD_DIRECTIONS = [
+  { id: "front", azimuth: 0, elevation: 15, distance: 4.9, gain: 0.12, delay: 0.007 },
+  { id: "frontLeft", azimuth: -76, elevation: 20, distance: 6.8, gain: 0.18, delay: 0.0096 },
+  { id: "frontRight", azimuth: 76, elevation: 20, distance: 6.8, gain: 0.18, delay: 0.0099 },
+  { id: "left", azimuth: -118, elevation: 12, distance: 8.0, gain: 0.205, delay: 0.0132 },
+  { id: "right", azimuth: 118, elevation: 12, distance: 8.0, gain: 0.205, delay: 0.0135 },
+  { id: "rearLeft", azimuth: -138, elevation: 18, distance: 7.2, gain: 0.008, delay: 0.019 },
+  { id: "rearRight", azimuth: 138, elevation: 18, distance: 7.2, gain: 0.008, delay: 0.0193 },
+  { id: "rear", azimuth: 180, elevation: 8, distance: 7.2, gain: 0.004, delay: 0.022 },
+  { id: "heightFront", azimuth: -22, elevation: 68, distance: 6.6, gain: 0.09, delay: 0.016 },
+  { id: "heightRear", azimuth: 168, elevation: 64, distance: 7.1, gain: 0.004, delay: 0.0225 }
+];
+const SPATIAL_FIELD_HRTF_TAPS = new Set(["frontLeft", "frontRight", "left", "right", "rearLeft", "rearRight", "rear", "heightFront", "heightRear"]);
+const RUNTIME_QUALITY_PROFILE = {
+  label: "Full",
+  meterInterval: VISUAL_FRAME_INTERVAL,
+  stemDisplayInterval: VISUAL_FRAME_INTERVAL,
+  fieldDisplayInterval: VISUAL_FRAME_INTERVAL,
+  spectrumInterval: VISUAL_FRAME_INTERVAL,
+  seekInterval: VISUAL_FRAME_INTERVAL,
+  waveformInterval: VISUAL_FRAME_INTERVAL
+};
+
+const STEM_POSITION_GROUPS = {
+  vocals: [
+    ["piano", 0.92],
+    ["violins1", 0.82],
+    ["violins2", 0.58],
+    ["flute", 0.58],
+    ["oboe", 0.5],
+    ["trumpet", 0.38],
+    ["harp", 0.34]
+  ],
+  other: [
+    ["violins1", 0.78],
+    ["violins2", 0.76],
+    ["violas", 0.72],
+    ["cellos", 0.66],
+    ["flute", 0.54],
+    ["oboe", 0.56],
+    ["clarinet", 0.56],
+    ["bassoon", 0.44],
+    ["horn", 0.46],
+    ["trumpet", 0.38],
+    ["trombone", 0.36],
+    ["harp", 0.42],
+    ["piano", 0.52]
+  ],
+  drums: [
+    ["percussion", 1],
+    ["timpani", 0.86],
+    ["harp", 0.3],
+    ["piano", 0.24]
+  ],
+  bass: [
+    ["basses", 1],
+    ["cellos", 0.74],
+    ["bassoon", 0.42],
+    ["timpani", 0.34],
+    ["trombone", 0.24]
+  ]
+};
+
+const STEM_POSITION_BOUNDS = {
+  x: [-3.85, 3.85],
+  y: [-0.2, 0.68],
+  z: [-5.35, -1.15]
+};
+
+const STEM_POSITION_ANCHORS = {
+  vocals: {
+    x: 0,
+    y: 0.24,
+    z: -2.35,
+    lateralMix: 0.08,
+    verticalMix: 0.34,
+    depthMix: 0.46,
+    maxAbsX: 0.16
+  }
+};
+
+const STEM_STAGE_LAYOUT = {
+  vocals: { left: 50, top: 30 },
+  other: { left: 29, top: 53 },
+  drums: { left: 71, top: 53 },
+  bass: { left: 50, top: 75 }
+};
 
 const refs = {
   fileInput: $("#audio-file"),
@@ -6,8 +154,9 @@ const refs = {
   resetButton: $("#reset-button"),
   themeToggle: $("#theme-toggle"),
   themeToggleText: $("#theme-toggle-text"),
-  remasterToggle: $("#remaster-toggle"),
-  concertHallToggle: $("#concert-hall-toggle"),
+  perfToggle: $("#perf-toggle"),
+  perfPanel: $("#perf-panel"),
+  perfClose: $("#perf-close"),
   statusText: $("#status-text"),
   toast: $("#toast"),
   trackKicker: $("#track-kicker"),
@@ -19,28 +168,13 @@ const refs = {
   currentTime: $("#current-time"),
   totalTime: $("#total-time"),
   modeButtons: Array.from(document.querySelectorAll(".mode-button")),
-  sliders: {
-    width: $("#width-slider"),
-    depth: $("#depth-slider"),
-    room: $("#room-slider"),
-    gain: $("#gain-slider"),
-    remasterAmount: $("#remaster-amount-slider"),
-    remasterTone: $("#remaster-tone-slider"),
-    remasterClarity: $("#remaster-clarity-slider"),
-    remasterHeadroom: $("#remaster-headroom-slider")
-  },
-  sliderValues: {
-    width: $("#width-value"),
-    depth: $("#depth-value"),
-    room: $("#room-value"),
-    gain: $("#gain-value"),
-    remaster: $("#remaster-value"),
-    concertHall: $("#concert-hall-value"),
-    remasterAmount: $("#remaster-amount-value"),
-    remasterTone: $("#remaster-tone-value"),
-    remasterClarity: $("#remaster-clarity-value"),
-    remasterHeadroom: $("#remaster-headroom-value")
-  },
+  spatialEngineMode: $("#spatial-engine-mode"),
+  spatialEngineStatus: $("#spatial-engine-status"),
+  spatialWetValue: $("#spatial-wet-value"),
+  spatialRadiusValue: $("#spatial-radius-value"),
+  spatialReflectionValue: $("#spatial-reflection-value"),
+  sliders: {},
+  sliderValues: {},
   metrics: {
     duration: $("#duration-value"),
     sampleRate: $("#sample-rate-value"),
@@ -58,14 +192,23 @@ const refs = {
   activeCount: $("#active-count"),
   frameTime: $("#frame-time"),
   stageMap: $("#stage-map"),
+  spectrumCanvas: $("#spectrum-canvas"),
+  spectrumStatus: $("#spectrum-status"),
   instrumentList: $("#instrument-list"),
   waveformCanvas: $("#waveform-canvas"),
   waveformTag: $("#waveform-tag"),
-  remasterTag: $("#remaster-tag"),
-  remasterGrid: $("#remaster-grid"),
   modelTag: $("#model-tag"),
   modelStack: $("#model-stack"),
   sectionList: $("#section-list")
+};
+
+refs.perf = {
+  fps: $("#perf-fps"),
+  frame: $("#perf-frame"),
+  meter: $("#perf-meter"),
+  waveform: $("#perf-waveform"),
+  nodes: $("#perf-nodes"),
+  heap: $("#perf-heap")
 };
 
 const state = {
@@ -75,200 +218,75 @@ const state = {
   audioBuffer: null,
   stemBuffers: null,
   graph: null,
+  displayObjects: null,
   mode: "spatial",
   playing: false,
   startedAt: 0,
   offset: 0,
   animationId: 0,
+  retiredGraphs: [],
   meterLevels: {},
+  metersZeroed: false,
+  fieldLevels: {},
+  fieldNodeGroups: {},
+  fieldDriftSeeds: {},
+  spectrumLevels: Array.from({ length: SPECTRUM_BAR_COUNT }, () => 0),
+  spectrumPeaks: Array.from({ length: SPECTRUM_BAR_COUNT }, () => 0),
+  spectrumContext: null,
+  spectrumRanges: null,
+  spectrumRangeKey: "",
+  spectrumCache: {
+    width: 0,
+    height: 0,
+    dpr: 1,
+    backgroundKey: "",
+    backgroundCanvas: null,
+    gradientKey: "",
+    gradient: null
+  },
+  stemPositionCache: {},
+  stemDisplayPositions: {},
+  meterRows: {},
+  waveformContext: null,
+  waveformCache: {
+    width: 0,
+    height: 0,
+    dpr: 1,
+    backgroundKey: "",
+    backgroundCanvas: null,
+    barsKey: "",
+    bars: [],
+    gradientKey: "",
+    gradient: null
+  },
+  resizeFrame: 0,
+  perf: {
+    enabled: false,
+    fps: 0,
+    droppedFrames: 0,
+    lastFrameAt: 0,
+    lastPanelAt: 0,
+    frameMs: [],
+    meterMs: [],
+    spectrumMs: [],
+    waveformMs: []
+  },
+  lastWaveformDrawTime: -1,
+  lastMeterFrameTime: -1,
+  lastStemDisplayFrameTime: -1,
+  lastFieldDisplayFrameTime: -1,
+  lastSpectrumFrameTime: -1,
+  lastSeekFrameTime: -1,
+  lastVisualFrameAt: 0,
+  lastLiveAnalysisFrame: null,
+  liveOutputLevel: 0,
   liveScores: {},
-  autoRemasterValues: {
-    width: 1.45,
-    depth: 1.62,
-    remasterAmount: 0.82,
-    remasterTone: 0,
-    remasterClarity: 0.64,
-    remasterHeadroom: 0.62
-  },
-  settings: {
-    width: 1.45,
-    depth: 1.62,
-    room: 0.58,
-    gain: 1,
-    remaster: true,
-    concertHall: false,
-    remasterAmount: 0.82,
-    remasterTone: 0,
-    remasterClarity: 0.64,
-    remasterHeadroom: 0.62
-  }
-};
-
-const SHORT_NAMES = {
-  violins1: "Vn I",
-  violins2: "Vn II",
-  violas: "Va",
-  cellos: "Vc",
-  basses: "Cb",
-  flute: "Fl",
-  oboe: "Ob",
-  clarinet: "Cl",
-  bassoon: "Bn",
-  horn: "Hn",
-  trumpet: "Tp",
-  trombone: "Tb",
-  timpani: "Tmp",
-  percussion: "Perc",
-  harp: "Hp",
-  piano: "Pf"
-};
-
-const STEM_ORDER = ["vocals", "other", "drums", "bass"];
-
-const STEM_PROFILES = {
-  vocals: {
-    id: "vocals",
-    label: "Lead Stem",
-    description: "멜로디와 전면 중심을 잡는 stem",
-    short: "Lead",
-    color: "#c86f5a",
-    position: { x: 0, y: 0.2, z: -1.75 },
-    gain: 0.94,
-    send: 0.24,
-    highpass: 110,
-    lowShelfHz: 180,
-    lowShelfGain: -0.6,
-    bodyHz: 1450,
-    bodyGain: 0,
-    airGain: 0.25,
-    pan: 0
-  },
-  other: {
-    id: "other",
-    label: "Music Stem",
-    description: "화성, 질감, 잔향감의 넓이를 만드는 stem",
-    short: "Music",
-    color: "#517f96",
-    position: { x: -1.05, y: 0.22, z: -3.35 },
-    gain: 0.9,
-    send: 0.36,
-    highpass: 90,
-    lowShelfHz: 210,
-    lowShelfGain: -2.4,
-    bodyHz: 980,
-    bodyGain: 0,
-    airGain: 0.3,
-    pan: -0.12
-  },
-  drums: {
-    id: "drums",
-    label: "Transient Stem",
-    description: "타격감과 거리 단서를 만드는 stem",
-    short: "Hit",
-    color: "#b89148",
-    position: { x: 1.0, y: 0.12, z: -3.9 },
-    gain: 0.84,
-    send: 0.28,
-    highpass: 95,
-    lowShelfHz: 180,
-    lowShelfGain: -3.2,
-    bodyHz: 2500,
-    bodyGain: 0,
-    airGain: 0.35,
-    pan: 0.1
-  },
-  bass: {
-    id: "bass",
-    label: "Low Stem",
-    description: "저역 위치만 고정하고 공간 잔향에서는 억제하는 stem",
-    short: "Low",
-    color: "#687f5b",
-    position: { x: 0, y: -0.12, z: -1.35 },
-    gain: 0.24,
-    send: 0,
-    highpass: 82,
-    lowShelfHz: 135,
-    lowShelfGain: -10.5,
-    bodyHz: 145,
-    bodyGain: -2.2,
-    airGain: 0,
-    pan: 0
-  }
-};
-
-const AUTO_REMASTER_KEYS = new Set([
-  "width",
-  "depth",
-  "remasterAmount",
-  "remasterTone",
-  "remasterClarity",
-  "remasterHeadroom"
-]);
-
-const LIVE_SIGNATURES = {
-  violins1: {
-    bands: [[620, 1200, 0.18], [1200, 2600, 0.34], [2600, 6200, 0.34], [6200, 9400, 0.14]],
-    gate: "stringHigh"
-  },
-  violins2: {
-    bands: [[420, 1000, 0.2], [1000, 2200, 0.36], [2200, 5200, 0.32], [5200, 8200, 0.12]],
-    gate: "stringHigh"
-  },
-  violas: {
-    bands: [[180, 620, 0.24], [620, 1500, 0.42], [1500, 3400, 0.26], [3400, 5600, 0.08]],
-    gate: "stringMid"
-  },
-  cellos: {
-    bands: [[65, 260, 0.34], [260, 760, 0.42], [760, 2200, 0.2], [2200, 4200, 0.04]],
-    gate: "stringLow"
-  },
-  basses: {
-    bands: [[38, 160, 0.58], [160, 460, 0.32], [460, 1000, 0.1]],
-    gate: "low"
-  },
-  flute: {
-    bands: [[760, 1600, 0.12], [1600, 3600, 0.32], [3600, 7600, 0.42], [7600, 11000, 0.14]],
-    gate: "woodwindHigh"
-  },
-  oboe: {
-    bands: [[420, 1100, 0.16], [1100, 2600, 0.44], [2600, 5200, 0.32], [5200, 8000, 0.08]],
-    gate: "woodwindMid"
-  },
-  clarinet: {
-    bands: [[180, 620, 0.22], [620, 1500, 0.44], [1500, 3400, 0.26], [3400, 6200, 0.08]],
-    gate: "woodwindMid"
-  },
-  bassoon: {
-    bands: [[70, 260, 0.22], [260, 760, 0.46], [760, 1800, 0.24], [1800, 3600, 0.08]],
-    gate: "woodwindLow"
-  },
-  horn: {
-    bands: [[80, 260, 0.18], [260, 760, 0.42], [760, 1700, 0.3], [1700, 3400, 0.1]],
-    gate: "brassWarm"
-  },
-  trumpet: {
-    bands: [[380, 1000, 0.14], [1000, 2600, 0.38], [2600, 6200, 0.36], [6200, 9800, 0.12]],
-    gate: "brassBright"
-  },
-  trombone: {
-    bands: [[100, 360, 0.18], [360, 1100, 0.42], [1100, 2600, 0.3], [2600, 5200, 0.1]],
-    gate: "brassWarm"
-  },
-  timpani: {
-    bands: [[45, 180, 0.68], [180, 360, 0.22], [360, 720, 0.1]],
-    gate: "impactLow"
-  },
-  percussion: {
-    bands: [[1000, 3000, 0.18], [3000, 7600, 0.46], [7600, 14000, 0.36]],
-    gate: "impactHigh"
-  },
-  harp: {
-    bands: [[260, 900, 0.16], [900, 2600, 0.3], [2600, 6200, 0.36], [6200, 11000, 0.18]],
-    gate: "pluck"
-  },
-  piano: {
-    bands: [[45, 180, 0.12], [180, 620, 0.26], [620, 1800, 0.3], [1800, 5200, 0.24], [5200, 9000, 0.08]],
-    gate: "piano"
+  hrtfImpulseCache: new Map(),
+  spatialSettings: { ...SPATIAL_ENGINE_DEFAULTS },
+  spatialAnalysisSummary: {
+    openness: 0,
+    dynamics: 0,
+    density: 0
   }
 };
 
@@ -276,12 +294,12 @@ init();
 
 function init() {
   applyStoredTheme();
+  syncFieldModeState();
 
   refs.fileInput.addEventListener("change", () => {
     const file = refs.fileInput.files && refs.fileInput.files[0];
     if (file) analyzeFile(file);
   });
-
   refs.dropZone.addEventListener("dragover", (event) => {
     event.preventDefault();
     refs.dropZone.classList.add("is-dragging");
@@ -296,41 +314,114 @@ function init() {
 
   refs.resetButton.addEventListener("click", resetApp);
   refs.themeToggle.addEventListener("click", toggleTheme);
-  refs.remasterToggle.addEventListener("change", () => {
-    state.settings.remaster = refs.remasterToggle.checked;
-    refs.sliderValues.remaster.textContent = state.settings.remaster ? "ON" : "OFF";
-    renderRemasterProfile(state.analysis);
-    updateAutoRemasterAutomation(getPlaybackTime(), { force: true });
-    updateLiveGraphSettings();
-  });
-  refs.concertHallToggle.addEventListener("change", () => {
-    state.settings.concertHall = refs.concertHallToggle.checked;
-    refs.sliderValues.concertHall.textContent = state.settings.concertHall ? "ON" : "OFF";
-    updateLiveGraphSettings();
-  });
+  refs.perfToggle.addEventListener("click", () => setPerfPanelEnabled(!state.perf.enabled));
+  refs.perfClose.addEventListener("click", () => setPerfPanelEnabled(false));
   refs.playButton.addEventListener("click", togglePlayback);
   refs.stopButton.addEventListener("click", stopPlayback);
   refs.seekSlider.addEventListener("input", seekToSlider);
 
   refs.modeButtons.forEach((button) => {
     button.addEventListener("click", () => {
-      state.mode = button.dataset.mode;
+      const nextMode = button.dataset.mode;
+      if (!nextMode || nextMode === state.mode) return;
+      state.mode = nextMode;
+      const time = getPlaybackTime();
       refs.modeButtons.forEach((item) => item.classList.toggle("is-active", item === button));
+      syncFieldModeState();
+      if (state.mode === "original") {
+        setRealtimeMetersToZero(time);
+      }
+      if (!state.playing) {
+        if (state.mode === "original") {
+          setRealtimeMetersToZero(state.offset);
+        } else {
+          updateRealtimeDisplay(state.offset);
+          updateSoundFieldDisplay(state.offset, readSoundFieldScores(state.offset));
+        }
+        updateSpectrumDisplay(state.offset, { zero: true });
+      }
       if (state.playing) {
-        restartPlaybackAtCurrentTime();
+        crossfadePlaybackMode(time).catch((error) => {
+          console.error(error);
+          stopPlayback({ keepOffset: true, silent: true });
+          state.offset = time;
+          startPlayback();
+        });
       }
     });
   });
 
-  Object.entries(refs.sliders).forEach(([key, slider]) => {
-    slider.addEventListener("input", () => updateSetting(key, slider.value));
-    updateSetting(key, slider.value);
-  });
-  refs.sliderValues.remaster.textContent = refs.remasterToggle.checked ? "ON" : "OFF";
-  state.settings.concertHall = refs.concertHallToggle.checked;
-  refs.sliderValues.concertHall.textContent = state.settings.concertHall ? "ON" : "OFF";
-
   drawEmptyWaveform();
+  drawSpectrumGraph(state.spectrumLevels, { zero: true, force: true });
+  updateSpatialControlUi();
+}
+
+function syncFieldModeState() {
+  refs.stageMap.dataset.mode = state.mode;
+  document.body.dataset.playbackMode = state.mode;
+  updateSpatialControlUi();
+}
+
+function updateSpatialControlUi() {
+  const settings = state.spatialSettings;
+  setText(refs.spatialWetValue, `${Math.round(settings.wet * 100)}%`);
+  setText(refs.spatialRadiusValue, `${Math.round(settings.radius * 100)}%`);
+  setText(refs.spatialReflectionValue, `${Math.round(settings.reflections * 100)}%`);
+  if (refs.spatialEngineMode) {
+    setText(refs.spatialEngineMode, state.mode === "spatial" ? getSpatialRendererModeLabel() : "Dry bypass");
+  }
+  if (refs.spatialEngineStatus) {
+    setText(refs.spatialEngineStatus, state.mode === "spatial"
+      ? getSpatialRendererStatusText()
+      : "Original only");
+  }
+}
+
+function getSpatialRendererModeLabel() {
+  return "Original overlay renderer";
+}
+
+function getSpatialRendererStatusText() {
+  return "Spatial-first field";
+}
+
+function updateSpatialSettingsFromAnalysis(analysis) {
+  const mix = analysis?.mix || {};
+  const stereo = analysis?.stereoImage || {};
+  const sections = Array.isArray(analysis?.sections) ? analysis.sections : [];
+  const activeCount = Array.isArray(analysis?.activeIds) ? analysis.activeIds.length : 0;
+  const sectionEnergy = sections.length
+    ? sections.reduce((sum, section) => sum + (Number(section.energy) || 0), 0) / sections.length
+    : clamp(((Number(mix.rmsDb) || -24) + 42) / 30, 0, 1);
+  const density = sections.length
+    ? sections.reduce((sum, section) => sum + (Number(section.density) || 0), 0) / sections.length
+    : clamp(activeCount / 10, 0, 1);
+  const brightness = clamp(((Number(mix.centroidHz) || 1200) - 420) / 5200, 0, 1);
+  const dynamics = clamp(((Number(mix.crestDb) || 12) - 7) / 15, 0, 1);
+  const stereoWidth = clamp(Number(stereo.width) || 0, 0, 1);
+  const openness = clamp(brightness * 0.38 + stereoWidth * 0.34 + dynamics * 0.16 + sectionEnergy * 0.12, 0, 1);
+  const lowWeight = clamp(1 - brightness * 0.64 + Math.max(0, 5 - activeCount) * 0.035, 0, 1);
+
+  state.spatialAnalysisSummary = { openness, dynamics, density };
+  state.spatialSettings = {
+    wet: clamp(0.5 + openness * 0.24 + dynamics * 0.07 - lowWeight * 0.003, 0.48, 0.78),
+    radius: clamp(1 + openness * 0.08 + stereoWidth * 0.05 + density * 0.025, 0.98, 1.08),
+    reflections: clamp(0.2 + density * 0.14 + sectionEnergy * 0.07 + brightness * 0.04, 0.18, 0.56)
+  };
+  updateSpatialControlUi();
+}
+
+function resetLiveAnalysisCache() {
+  state.lastLiveAnalysisFrame = null;
+  state.liveOutputLevel = 0;
+}
+
+function getRuntimeQualityProfile() {
+  return RUNTIME_QUALITY_PROFILE;
+}
+
+function resetRuntimeQualityState() {
+  state.perf.lastFrameAt = 0;
 }
 
 async function analyzeFile(file) {
@@ -339,9 +430,27 @@ async function analyzeFile(file) {
   state.analysis = null;
   state.audioBuffer = null;
   state.stemBuffers = null;
+  state.displayObjects = null;
   state.liveScores = {};
   state.meterLevels = {};
-  setBusy(true, "Demucs stem 분리 및 공간 분석 중");
+  state.metersZeroed = false;
+  state.fieldLevels = {};
+  state.fieldNodeGroups = {};
+  state.fieldDriftSeeds = {};
+  resetSpectrumState();
+  state.stemPositionCache = {};
+  state.stemDisplayPositions = {};
+  state.meterRows = {};
+  resetWaveformCache();
+  state.lastWaveformDrawTime = -1;
+  state.lastMeterFrameTime = -1;
+  state.lastStemDisplayFrameTime = -1;
+  state.lastFieldDisplayFrameTime = -1;
+  state.lastSpectrumFrameTime = -1;
+  state.lastSeekFrameTime = -1;
+  state.lastVisualFrameAt = 0;
+  resetLiveAnalysisCache();
+  setBusy(true, "Demucs stem 분리 및 원본 분석 중");
   refs.trackKicker.textContent = "ANALYZING";
   refs.trackName.textContent = file.name;
   refs.trackSubtitle.textContent = `${formatBytes(file.size)} · 로컬 AI 분석 준비 중`;
@@ -351,25 +460,35 @@ async function analyzeFile(file) {
 
   try {
     const context = await ensureAudioContext();
+    resetRuntimeQualityState();
     const decodePromise = file.arrayBuffer().then((buffer) => context.decodeAudioData(buffer.slice(0)));
     const analyzePromise = postAudioForAnalysis(file);
-    const [audioBuffer, analysis] = await Promise.all([decodePromise, analyzePromise]);
+    const [audioBuffer, analysis] = await Promise.all([
+      decodePromise,
+      analyzePromise
+    ]);
 
     state.audioBuffer = audioBuffer;
     state.analysis = analysis;
-    if (analysis.models.deepSeparator.status === "completed") {
-      setBusy(true, "분리된 stem 디코딩 중");
+    updateSpatialSettingsFromAnalysis(analysis);
+    const separator = analysis.models.deepSeparator;
+    if (separator.status === "completed") {
+      setBusy(true, separator.cached ? "캐시된 stem 디코딩 중" : "분리된 stem 디코딩 중");
       state.stemBuffers = await loadStemBuffers(context, analysis);
     }
+    setBusy(true, "재설계용 원본 출력 경로 준비 중");
     state.offset = 0;
     renderAnalysis(analysis);
-    updateAutoRemasterAutomation(0, { force: true });
     refs.playButton.disabled = false;
     refs.stopButton.disabled = false;
     refs.seekSlider.disabled = false;
     document.body.classList.add("has-analysis");
-    setBusy(false, state.stemBuffers ? "Demucs 공간 렌더링 준비 완료" : "공간 분석 완료");
-    showToast(state.stemBuffers ? "Demucs stem 기반 공간음향 준비가 완료됐습니다." : "기본 공간음향 분석이 완료됐습니다.");
+    setBusy(false, state.stemBuffers
+      ? (separator.cached ? "캐시 기반 분석 준비 완료" : "Demucs 분석 준비 완료")
+      : "원본 분석 완료");
+    showToast(state.stemBuffers
+      ? (separator.cached ? "캐시된 stem 분석 준비가 완료됐습니다." : "Demucs stem 분석 준비가 완료됐습니다.")
+      : "원본 기준선 분석이 완료됐습니다.");
   } catch (error) {
     console.error(error);
     setBusy(false, "분석 실패");
@@ -380,9 +499,10 @@ async function analyzeFile(file) {
 async function postAudioForAnalysis(file) {
   const params = new URLSearchParams({
     filename: file.name,
-    demucs: "true"
+    demucs: "true",
+    demucs_model: DEMUCS_MODEL
   });
-  const response = await fetch(`/api/analyze?${params.toString()}`, {
+  const response = await fetch(apiPath(`/api/analyze?${params.toString()}`), {
     method: "POST",
     headers: {
       "Content-Type": file.type || "application/octet-stream"
@@ -407,7 +527,7 @@ async function loadStemBuffers(context, analysis) {
   if (!stems.length) return null;
   const loaded = {};
   const settled = await Promise.allSettled(stems.map(async (stem) => {
-    const response = await fetch(`/outputs/${stem.path}`);
+    const response = await fetch(apiPath(`/outputs/${stem.path}`));
     if (!response.ok) throw new Error(`${stem.label} stem 로드 실패 (${response.status})`);
     const data = await response.arrayBuffer();
     loaded[stem.id] = {
@@ -425,6 +545,7 @@ async function loadStemBuffers(context, analysis) {
 function getDemucsStemItems(analysis) {
   const separator = analysis && analysis.models && analysis.models.deepSeparator;
   if (!separator || separator.status !== "completed" || !Array.isArray(separator.stems)) return [];
+  const stemQuality = separator.stemQuality || {};
   const seen = new Set();
   const stems = separator.stems.map((path) => {
     const filename = path.split("/").pop() || "";
@@ -432,12 +553,16 @@ function getDemucsStemItems(analysis) {
     const profile = STEM_PROFILES[id];
     if (!profile || seen.has(id)) return null;
     seen.add(id);
+    const quality = stemQuality[id] || {};
     return {
       ...profile,
       path,
       kind: "stem",
       active: true,
       family: "stem",
+      quality,
+      separation: clamp(Number(quality.separation) || 0.72, 0, 1),
+      spatialWeight: getStemQualitySpatialWeight(quality),
       displayCurve: [],
       curve: []
     };
@@ -445,11 +570,20 @@ function getDemucsStemItems(analysis) {
   return stems.sort((a, b) => STEM_ORDER.indexOf(a.id) - STEM_ORDER.indexOf(b.id));
 }
 
+function getStemQualitySpatialWeight(quality = {}) {
+  const explicit = Number(quality.spatialWeight);
+  if (Number.isFinite(explicit)) return clamp(explicit, 0.62, 1.08);
+  const separation = Number(quality.separation);
+  if (Number.isFinite(separation)) return clamp(0.72 + separation * 0.36, 0.62, 1.08);
+  return 1;
+}
+
 async function ensureAudioContext() {
   if (!state.audioContext) {
     state.audioContext = new (window.AudioContext || window.webkitAudioContext)({
       latencyHint: "interactive"
     });
+    configureSpatialListener(state.audioContext);
   }
   if (state.audioContext.state === "suspended") {
     await state.audioContext.resume();
@@ -457,11 +591,40 @@ async function ensureAudioContext() {
   return state.audioContext;
 }
 
+function configureSpatialListener(context) {
+  const listener = context?.listener;
+  if (!listener) return;
+  setAudioParamValue(listener.positionX, 0, context.currentTime);
+  setAudioParamValue(listener.positionY, 0, context.currentTime);
+  setAudioParamValue(listener.positionZ, 0, context.currentTime);
+  setAudioParamValue(listener.forwardX, 0, context.currentTime);
+  setAudioParamValue(listener.forwardY, 0, context.currentTime);
+  setAudioParamValue(listener.forwardZ, -1, context.currentTime);
+  setAudioParamValue(listener.upX, 0, context.currentTime);
+  setAudioParamValue(listener.upY, 1, context.currentTime);
+  setAudioParamValue(listener.upZ, 0, context.currentTime);
+  if (typeof listener.setPosition === "function") {
+    listener.setPosition(0, 0, 0);
+  }
+  if (typeof listener.setOrientation === "function") {
+    listener.setOrientation(0, 0, -1, 0, 1, 0);
+  }
+}
+
+function setAudioParamValue(param, value, time = 0) {
+  if (!param) return;
+  if (typeof param.setValueAtTime === "function") {
+    param.setValueAtTime(value, time);
+  } else {
+    param.value = value;
+  }
+}
+
 function renderAnalysis(analysis) {
   const file = analysis.file;
   refs.trackKicker.textContent = "READY";
   refs.trackName.textContent = file.name;
-  refs.trackSubtitle.textContent = `${formatTime(file.duration)} · ${file.channels}ch · ${formatBytes(state.file.size)}`;
+  refs.trackSubtitle.textContent = `${formatTime(file.duration)} · ${file.channels}ch · ${formatBytes(state.file.size)} · 원본 기준선`;
   refs.totalTime.textContent = formatTime(file.duration);
 
   refs.metrics.duration.textContent = formatTime(file.duration);
@@ -478,37 +641,286 @@ function renderAnalysis(analysis) {
   refs.metrics.rolloff.textContent = `rolloff ${Math.round(analysis.mix.rolloffHz)} Hz`;
 
   refs.waveformTag.textContent = `${analysis.waveform.length} points`;
+  setDisplayObjects(analysis);
 
   renderStage(analysis);
   renderInstrumentList(analysis);
-  renderRemasterProfile(analysis);
+  renderSpectrumGraph();
   renderModelStack(analysis);
   renderSections(analysis);
   drawWaveform(0);
   updateRealtimeDisplay(0);
+  updateSpectrumDisplay(0, { zero: true });
 }
 
 function renderStage(analysis) {
   const objects = getDisplayObjects(analysis);
+  syncFieldModeState();
   refs.activeCount.textContent = state.stemBuffers ? `${objects.length} stems` : `${analysis.activeIds.length} active`;
-  refs.stageMap.innerHTML = objects.map((object) => {
-    const left = mapRange(object.position.x, -3.4, 3.4, 13, 87);
-    const top = mapRange(object.position.z, -4.2, -0.8, 18, 78);
-    return `
-      <div class="stage-node ${object.active ? "" : "is-inactive"}"
-        data-id="${object.id}"
-        data-label="${object.label}"
-        data-family="${object.family}"
-        style="left:${left}%; top:${top}%; --node-color:${object.color}; --level:0">
-        <strong>${object.short || SHORT_NAMES[object.id] || object.label}</strong>
-      </div>
-    `;
-  }).join("");
+  refs.stageMap.innerHTML = `
+    <div class="field-grid" aria-hidden="true"></div>
+    <div class="field-depth depth-near" aria-hidden="true"></div>
+    <div class="field-depth depth-far" aria-hidden="true"></div>
+    <div class="field-node-layer">
+      ${createStageNodes(objects).map((node) => `
+        <span class="stage-node ${node.object.active ? "" : "is-inactive"}"
+          data-id="${node.object.id}"
+          data-label="${escapeHtml(node.object.label)}"
+          data-family="${node.object.family}"
+          data-index="${node.index}"
+          data-total="${objects.length}"
+          style="left:${node.left.toFixed(3)}%; top:${node.top.toFixed(3)}%; --node-color:${node.color}; --level:0">
+          <strong>${escapeHtml(node.short)}</strong>
+          <span>${escapeHtml(node.label)}</span>
+        </span>
+      `).join("")}
+    </div>
+  `;
+  cacheFieldNodes();
+}
+
+function createStageNodes(objects) {
+  if (!objects.length) return [];
+  return objects.map((object, index) => {
+    const point = getObjectStagePoint(object, index, objects.length, state.offset, { immediate: true });
+    return {
+      object,
+      index,
+      left: point.left,
+      top: point.top,
+      short: object.short || SHORT_NAMES[object.id] || object.label,
+      label: object.label,
+      color: object.color
+    };
+  });
+}
+
+function getObjectStagePoint(object, index = 0, total = 1, time = 0, options = {}) {
+  if (object.kind === "stem" && STEM_STAGE_LAYOUT[object.id]) {
+    return STEM_STAGE_LAYOUT[object.id];
+  }
+  const position = getObjectRenderPosition(object, time, options);
+  if (position && Number.isFinite(position.x) && Number.isFinite(position.z)) {
+    return {
+      left: clamp(50 + position.x * 10.7, 14, 86),
+      top: clamp(72 + position.z * 8.0 - (position.y || 0) * 8.5 + index * 0.38, 16, 84)
+    };
+  }
+  const angle = total > 1 ? (index / Math.max(1, total - 1)) * Math.PI : Math.PI * 0.5;
+  return {
+    left: clamp(18 + Math.cos(Math.PI - angle) * 32 + index * 0.4, 14, 86),
+    top: clamp(34 + Math.sin(angle) * 36, 16, 84)
+  };
+}
+
+function getObjectRenderPosition(object, time = 0, options = {}) {
+  if (!object) return null;
+  if (object.kind === "stem") {
+    if (options.dynamic || options.immediate) {
+      return getStemRenderPosition(object, time, options);
+    }
+    return state.stemDisplayPositions[object.id] || object.position || getStemFallbackPosition(object.id);
+  }
+  return getInstrumentStagePosition(object, time);
+}
+
+function getStemRenderPosition(stem, time = 0, options = {}) {
+  const inference = inferStemPosition(stem.id, time, options);
+  const current = state.stemDisplayPositions[stem.id] || stem.position || inference.position;
+  const ratio = options.immediate || !state.playing ? 1 : 0.22;
+  const next = {
+    x: current.x + (inference.position.x - current.x) * ratio,
+    y: current.y + (inference.position.y - current.y) * ratio,
+    z: current.z + (inference.position.z - current.z) * ratio
+  };
+  state.stemDisplayPositions[stem.id] = next;
+  stem.position = next;
+  stem.inferredPosition = inference.position;
+  stem.positionConfidence = inference.confidence;
+  stem.positionContributors = inference.contributors;
+  return next;
+}
+
+function inferStemPosition(stemId, time = null, options = {}) {
+  const fallback = getStemFallbackPosition(stemId);
+  if (!state.analysis || !Array.isArray(state.analysis.instruments)) {
+    return { position: fallback, confidence: 0, contributors: [] };
+  }
+  const finiteTime = Number.isFinite(time);
+  const bucket = finiteTime ? Math.max(0, Math.round(time * 6)) : "static";
+  const cacheKey = options.immediate ? "" : `${stemId}:${bucket}`;
+  if (cacheKey && state.stemPositionCache[cacheKey]) return state.stemPositionCache[cacheKey];
+
+  const groups = STEM_POSITION_GROUPS[stemId] || [];
+  const instruments = getAnalysisInstrumentLookup();
+  let sumWeight = 0;
+  let sumX = 0;
+  let sumY = 0;
+  let sumZ = 0;
+  let totalBaseWeight = 0;
+  const contributors = [];
+
+  groups.forEach(([instrumentId, baseWeight]) => {
+    const instrument = instruments[instrumentId];
+    if (!instrument || !instrument.position) return;
+    const instrumentPosition = getInstrumentStagePosition(instrument, finiteTime ? time : null);
+    const activity = getInstrumentPositionActivity(instrument, finiteTime ? time : null);
+    const roster = instrument.active ? 1 : 0.42;
+    totalBaseWeight += baseWeight * roster;
+    const confidence = clamp(
+      (Number(instrument.confidence) || 0) * 0.52 +
+      (Number(instrument.peak) || 0) * 0.3 +
+      (Number(instrument.mean) || 0) * 0.18,
+      0,
+      1
+    );
+    const evidence = finiteTime
+      ? clamp(activity * 0.82 + confidence * 0.18, 0, 1)
+      : clamp(activity * 0.34 + confidence * 0.66, 0, 1);
+    const weight = baseWeight * roster * evidence;
+    if (weight <= 0.012) return;
+    sumWeight += weight;
+    sumX += instrumentPosition.x * weight;
+    sumY += instrumentPosition.y * weight;
+    sumZ += instrumentPosition.z * weight;
+    contributors.push({
+      id: instrument.id,
+      label: instrument.label,
+      weight
+    });
+  });
+
+  if (sumWeight <= 0.035) {
+    const result = { position: fallback, confidence: 0, contributors: [] };
+    if (cacheKey) state.stemPositionCache[cacheKey] = result;
+    return result;
+  }
+
+  contributors.sort((a, b) => b.weight - a.weight);
+  const centroid = {
+    x: clamp(sumX / sumWeight, STEM_POSITION_BOUNDS.x[0], STEM_POSITION_BOUNDS.x[1]),
+    y: clamp(sumY / sumWeight, STEM_POSITION_BOUNDS.y[0], STEM_POSITION_BOUNDS.y[1]),
+    z: clamp(sumZ / sumWeight, STEM_POSITION_BOUNDS.z[0], STEM_POSITION_BOUNDS.z[1])
+  };
+  const confidence = clamp(sumWeight / Math.max(totalBaseWeight * 0.55, 0.001), 0, 1);
+  const mix = clamp(0.42 + confidence * 0.5, 0.38, 0.9);
+  const position = applyStemPositionAnchor(stemId, {
+    x: clamp(fallback.x * (1 - mix) + centroid.x * mix, STEM_POSITION_BOUNDS.x[0], STEM_POSITION_BOUNDS.x[1]),
+    y: clamp(fallback.y * (1 - mix) + centroid.y * mix, STEM_POSITION_BOUNDS.y[0], STEM_POSITION_BOUNDS.y[1]),
+    z: clamp(fallback.z * (1 - mix) + centroid.z * mix, STEM_POSITION_BOUNDS.z[0], STEM_POSITION_BOUNDS.z[1])
+  });
+  const result = {
+    position,
+    confidence,
+    contributors: contributors.slice(0, 3)
+  };
+  if (cacheKey) state.stemPositionCache[cacheKey] = result;
+  return result;
+}
+
+function applyStemPositionAnchor(stemId, position) {
+  const anchor = STEM_POSITION_ANCHORS[stemId];
+  if (!anchor) return position;
+  return {
+    x: clamp(
+      anchor.x + (position.x - anchor.x) * anchor.lateralMix,
+      anchor.x - anchor.maxAbsX,
+      anchor.x + anchor.maxAbsX
+    ),
+    y: clamp(
+      anchor.y * (1 - anchor.verticalMix) + position.y * anchor.verticalMix,
+      STEM_POSITION_BOUNDS.y[0],
+      STEM_POSITION_BOUNDS.y[1]
+    ),
+    z: clamp(
+      anchor.z * (1 - anchor.depthMix) + position.z * anchor.depthMix,
+      STEM_POSITION_BOUNDS.z[0],
+      STEM_POSITION_BOUNDS.z[1]
+    )
+  };
+}
+
+function getInstrumentStagePosition(instrument, time = null) {
+  const position = instrument.position || { x: 0, y: 0, z: -2.8 };
+  return {
+    x: position.x,
+    y: position.y || 0,
+    z: position.z || -2.8
+  };
+}
+
+function getAnalysisInstrumentLookup() {
+  if (!state.analysis || !Array.isArray(state.analysis.instruments)) return {};
+  const key = state.analysis.jobId || state.analysis.cacheKey || state.analysis.file?.name || "analysis";
+  if (state.stemPositionCache.instrumentKey === key && state.stemPositionCache.instrumentLookup) {
+    return state.stemPositionCache.instrumentLookup;
+  }
+  const lookup = {};
+  state.analysis.instruments.forEach((instrument) => {
+    lookup[instrument.id] = instrument;
+  });
+  state.stemPositionCache.instrumentKey = key;
+  state.stemPositionCache.instrumentLookup = lookup;
+  return lookup;
+}
+
+function getInstrumentPositionActivity(instrument, time = null) {
+  const curveLevel = Number.isFinite(time)
+    ? getInstrumentLevelFromCurve(instrument.curve || instrument.displayCurve || [], time)
+    : 0;
+  if (Number.isFinite(time)) {
+    return clamp(curveLevel * 0.88 + (Number(instrument.confidence) || 0) * 0.08 + (Number(instrument.mean) || 0) * 0.04, 0, 1);
+  }
+  return clamp(
+    (Number(instrument.confidence) || 0) * 0.48 +
+    (Number(instrument.peak) || 0) * 0.34 +
+    (Number(instrument.mean) || 0) * 0.18,
+    0,
+    1
+  );
+}
+
+function getStemFallbackPosition(stemId) {
+  const profile = STEM_PROFILES[stemId];
+  const fallback = profile && profile.position ? profile.position : { x: 0, y: 0, z: -2.8 };
+  return {
+    x: fallback.x,
+    y: fallback.y,
+    z: fallback.z
+  };
+}
+
+function cacheFieldNodes() {
+  const groups = {};
+  refs.stageMap.querySelectorAll(".stage-node").forEach((node) => {
+    const id = node.dataset.id;
+    if (!id) return;
+    if (!groups[id]) groups[id] = [];
+    groups[id].push(node);
+  });
+  state.fieldNodeGroups = groups;
+}
+
+function renderSpectrumGraph() {
+  resetSpectrumState();
+  updateSpectrumDisplay(0, { zero: true, force: true });
+}
+
+function resetSpectrumState() {
+  state.spectrumLevels = Array.from({ length: SPECTRUM_BAR_COUNT }, () => 0);
+  state.spectrumPeaks = Array.from({ length: SPECTRUM_BAR_COUNT }, () => 0);
+  state.spectrumRanges = null;
+  state.spectrumRangeKey = "";
+  state.spectrumCache.backgroundKey = "";
+  state.spectrumCache.backgroundCanvas = null;
+  state.spectrumCache.gradientKey = "";
+  state.spectrumCache.gradient = null;
 }
 
 function renderInstrumentList(analysis) {
   const objects = getDisplayObjects(analysis);
   state.meterLevels = Object.fromEntries(objects.map((object) => [object.id, 0]));
+  state.fieldLevels = Object.fromEntries(objects.map((object) => [object.id, 0]));
   refs.instrumentList.innerHTML = objects.map((object) => `
     <div class="instrument-row ${object.active ? "" : "is-inactive"}" data-id="${object.id}" style="--bar-color:${object.color}; --level:0">
       <div class="stem-copy">
@@ -519,6 +931,27 @@ function renderInstrumentList(analysis) {
       <em>0%</em>
     </div>
   `).join("");
+  cacheMeterRows();
+}
+
+function cacheMeterRows() {
+  const rows = {};
+  refs.instrumentList.querySelectorAll(".instrument-row").forEach((row) => {
+    const id = row.dataset.id;
+    if (!id) return;
+    rows[id] = {
+      row,
+      value: row.querySelector("em"),
+      cache: {
+        level: -1,
+        percent: -1,
+        sounding: null,
+        live: null,
+        inactive: null
+      }
+    };
+  });
+  state.meterRows = rows;
 }
 
 function getFallbackObjectDescription(object) {
@@ -526,12 +959,27 @@ function getFallbackObjectDescription(object) {
   if (object.family === "percussion") return "타격과 순간 에너지를 추적합니다.";
   if (object.family === "brass" || object.family === "woodwinds") return "중고역 존재감과 거리감을 추적합니다.";
   if (object.family === "strings") return "지속음과 선율 움직임을 추적합니다.";
-  return "공간 렌더링의 실시간 에너지를 추적합니다.";
+  return "실시간 에너지 변화를 추적합니다.";
 }
 
-function getDisplayObjects(analysis) {
+function setDisplayObjects(analysis) {
+  state.displayObjects = buildDisplayObjects(analysis);
+}
+
+function buildDisplayObjects(analysis) {
+  if (!analysis) return [];
   if (state.stemBuffers) {
-    return Object.values(state.stemBuffers).sort((a, b) => STEM_ORDER.indexOf(a.id) - STEM_ORDER.indexOf(b.id));
+    return Object.values(state.stemBuffers)
+      .sort((a, b) => STEM_ORDER.indexOf(a.id) - STEM_ORDER.indexOf(b.id))
+      .map((stem) => {
+        const enriched = { ...stem };
+        const inference = inferStemPosition(stem.id, state.offset || 0, { immediate: true });
+        enriched.position = getStemRenderPosition(enriched, state.offset || 0, { immediate: true });
+        enriched.inferredPosition = inference.position;
+        enriched.positionConfidence = inference.confidence;
+        enriched.positionContributors = inference.contributors;
+        return enriched;
+      });
   }
   return analysis.instruments.map((instrument) => ({
     ...instrument,
@@ -540,47 +988,38 @@ function getDisplayObjects(analysis) {
   }));
 }
 
-function renderRemasterProfile(analysis) {
-  const remaster = analysis && analysis.remaster;
-  if (!remaster) {
-    refs.remasterTag.textContent = "대기";
-    refs.remasterGrid.innerHTML = '<div class="remaster-empty">분석 후 자동 리마스터링 프로필이 표시됩니다.</div>';
-    return;
+function getDisplayObjects(analysis) {
+  if (analysis === state.analysis && Array.isArray(state.displayObjects)) {
+    return state.displayObjects;
   }
-  refs.remasterTag.textContent = state.settings.remaster ? "ON" : "OFF";
-  refs.remasterGrid.innerHTML = `
-    <div class="remaster-summary">
-      <strong>${remaster.targetLufs.toFixed(1)} LUFS target</strong>
-      <span>${escapeHtml(remaster.summary)}</span>
-    </div>
-    ${remaster.rows.map((row) => `
-      <div class="remaster-item">
-        <span>${escapeHtml(row.label)}</span>
-        <strong>${escapeHtml(row.value)}</strong>
-      </div>
-    `).join("")}
-  `;
+  return buildDisplayObjects(analysis);
 }
 
 function renderModelStack(analysis) {
   const separator = analysis.models.deepSeparator;
-  refs.modelTag.textContent = state.stemBuffers ? "Demucs spatial" : (separator.available ? "Demucs ready" : "Fallback active");
+  const demucsSettings = separator.settings || {};
+  const demucsProfile = separator.qualityProfile || "spatial-q2";
+  refs.modelTag.textContent = "Reference HRTF";
   refs.modelStack.innerHTML = `
     <div class="model-item">
       <strong>Demucs stem separator</strong>
       <span>${getDemucsStatusText(separator)}</span>
     </div>
     <div class="model-item">
-      <strong>Stem HRTF spatial renderer</strong>
-      <span>분리된 stem을 각각 독립 panner, 초기반사, 룸 컨볼루션, 출력 리미터로 처리합니다.</span>
+      <strong>Spatial overlay renderer</strong>
+      <span>Original dry signal stays at unity gain; Spatial adds only mix-derived HRTF, early-field, and side expansion layers.</span>
     </div>
     <div class="model-item">
-      <strong>Realtime stem meters</strong>
-      <span>재생 중인 각 stem 신호를 직접 읽어 반응 바와 공간 필드에 즉시 반영합니다.</span>
+      <strong>Reference HRTF field</strong>
+      <span>${escapeHtml(getBinauralRendererSummary())}</span>
     </div>
     <div class="model-item">
-      <strong>Fallback analysis</strong>
-      <span>Demucs가 실패하면 ${analysis.models.primary} 결과로 기본 공간 배치를 유지합니다.</span>
+      <strong>Model quality pass</strong>
+      <span>${escapeHtml(demucsProfile)} uses ${demucsSettings.device || "auto"} inference, ${demucsSettings.shifts || 1} shift averaging, overlap cleanup, and stem confidence weights.</span>
+    </div>
+    <div class="model-item">
+      <strong>Realtime analysis</strong>
+      <span>${analysis.models.primary} and Demucs stem analysers drive the UI meters only; audio output stays full-mix based.</span>
     </div>
     ${analysis.recommendations.map((item) => `
       <div class="model-item"><strong>Engine note</strong><span>${escapeHtml(item)}</span></div>
@@ -588,8 +1027,16 @@ function renderModelStack(analysis) {
   `;
 }
 
+function getBinauralRendererSummary() {
+  return "The dry mix is left intact while native HRTF taps, synthetic FIR fallback, side expansion, and short early-field reflections supply the spatial overlay.";
+}
+
 function getDemucsStatusText(separator) {
-  if (separator.status === "completed") return `stem 분리 완료 · ${separator.stems.length} files`;
+  const settings = separator.settings || {};
+  const quality = separator.qualityProfile ? ` · ${separator.qualityProfile}` : "";
+  const shifts = Number.isFinite(Number(settings.shifts)) ? ` · shifts ${settings.shifts}` : "";
+  if (separator.status === "completed" && separator.cached) return `cache hit · ${separator.stems.length} stem files${quality}${shifts}`;
+  if (separator.status === "completed") return `stem 분리 완료 · ${separator.stems.length} files${quality}${shifts}`;
   if (separator.status === "failed") return `실행 실패 · ${separator.reason || "unknown error"}`;
   if (separator.available && separator.requested) return "설치되어 있으며 분석 요청 시 자동으로 stem 분리를 실행합니다.";
   if (separator.available) return "설치됨 · 이 프로젝트에서는 기본적으로 stem 분리를 요청합니다.";
@@ -602,7 +1049,7 @@ function renderSections(analysis) {
       <strong>${formatTime(section.start)} - ${formatTime(section.end)}</strong>
       <small>energy ${Math.round(section.energy * 100)} · brightness ${Math.round(section.brightness * 100)} · density ${Math.round(section.density * 100)}</small>
       <ul>
-        <li>공간 처리 강도 ${Math.round(clamp(section.energy * 0.62 + section.density * 0.38, 0, 1) * 100)}%</li>
+        <li>분석 에너지 ${Math.round(clamp(section.energy * 0.62 + section.density * 0.38, 0, 1) * 100)}%</li>
       </ul>
     </article>
   `).join("");
@@ -622,6 +1069,14 @@ async function startPlayback() {
   if (!state.audioBuffer || !state.analysis) return;
   const context = await ensureAudioContext();
   stopPlayback({ keepOffset: true, silent: true });
+  resetRuntimeQualityState();
+  resetLiveAnalysisCache();
+  state.perf.lastFrameAt = 0;
+  state.lastVisualFrameAt = 0;
+  state.lastStemDisplayFrameTime = -1;
+  state.lastFieldDisplayFrameTime = -1;
+  state.lastSpectrumFrameTime = -1;
+  state.lastSeekFrameTime = -1;
 
   const graph = createPlaybackGraph(context, state.audioBuffer, state.analysis, state.mode);
   state.graph = graph;
@@ -629,611 +1084,915 @@ async function startPlayback() {
   state.startedAt = context.currentTime - safeOffset;
   state.playing = true;
   refs.playButton.textContent = "Ⅱ";
-  const sources = graph.sources || [graph.source];
-  sources.forEach((source) => {
-    const sourceOffset = source.buffer ? clamp(safeOffset, 0, Math.max(0, source.buffer.duration - 0.02)) : safeOffset;
-    source.start(0, sourceOffset);
-  });
-  sources[0].onended = () => {
+  startGraphSources(graph, safeOffset, () => {
     if (state.playing && getPlaybackTime() >= state.audioBuffer.duration - 0.05) {
       stopPlayback();
     }
-  };
+  });
   tick();
 }
 
-function restartPlaybackAtCurrentTime() {
-  const time = getPlaybackTime();
-  stopPlayback({ keepOffset: true, silent: true });
-  state.offset = time;
-  startPlayback();
+async function crossfadePlaybackMode(time) {
+  if (!state.audioBuffer || !state.analysis || !state.playing) return;
+  const context = await ensureAudioContext();
+  const oldGraph = state.graph;
+  const newGraph = createPlaybackGraph(context, state.audioBuffer, state.analysis, state.mode);
+  const safeOffset = clamp(time, 0, Math.max(0, state.audioBuffer.duration - 0.02));
+  const now = context.currentTime;
+  const scheduleLead = getModeSwitchScheduleLead(context);
+  const startAt = now + scheduleLead;
+  const sourceOffset = clamp(safeOffset + scheduleLead, 0, Math.max(0, state.audioBuffer.duration - 0.02));
+  const fadeSeconds = state.mode === "spatial" ? 0.38 : 0.34;
+  const targetGain = getGraphTargetGain(newGraph);
+  const incomingStartGain = 0;
+
+  if (newGraph.master) {
+    newGraph.master.gain.cancelScheduledValues(now);
+    newGraph.master.gain.setValueAtTime(0, now);
+    newGraph.crossfadeUntil = startAt + fadeSeconds;
+    scheduleGraphGainCurve(newGraph, incomingStartGain, targetGain, startAt, fadeSeconds, "in", "linear");
+  }
+  if (oldGraph?.mode === "original" && newGraph.mode === "spatial") {
+    scheduleSpatialWetLayerIntro(newGraph, now, startAt, fadeSeconds + 0.18);
+  }
+
+  state.graph = newGraph;
+  state.offset = safeOffset;
+  state.startedAt = now - safeOffset;
+  startGraphSources(newGraph, sourceOffset, () => {
+    if (state.playing && state.graph === newGraph && getPlaybackTime() >= state.audioBuffer.duration - 0.05) {
+      stopPlayback();
+    }
+  }, startAt);
+
+  if (oldGraph && oldGraph.master) {
+    scheduleGraphGainCurve(oldGraph, getGraphCurrentGain(oldGraph, startAt), 0, startAt, fadeSeconds, "out", "linear");
+    retireGraphAfterFade(oldGraph, scheduleLead + fadeSeconds);
+  } else if (oldGraph) {
+    retireGraphAfterFade(oldGraph, 0);
+  }
+}
+
+function getModeSwitchScheduleLead(context) {
+  const latency = context && Number.isFinite(context.baseLatency) ? context.baseLatency : 0.012;
+  return clamp(latency * 2.5, 0.035, 0.08);
+}
+
+function scheduleSpatialWetLayerIntro(graph, now, startAt, seconds) {
+  const wetGain = graph?.spatialLayer?.wetMaster?.gain;
+  const target = graph?.spatialLayer?.baseWetGain;
+  if (!wetGain || !Number.isFinite(target)) return;
+  wetGain.cancelScheduledValues(now);
+  wetGain.setValueAtTime(0, now);
+  wetGain.setValueAtTime(0, startAt);
+  wetGain.linearRampToValueAtTime(target, startAt + Math.max(0.12, seconds));
+}
+
+function startGraphSources(graph, offset, onEnded, startAt = 0) {
+  const sources = graph.sources || [graph.source];
+  sources.forEach((source) => {
+    if (!source) return;
+    const when = Number.isFinite(startAt) && startAt > 0 ? startAt : 0;
+    if (source.buffer) {
+      const sourceOffset = clamp(offset, 0, Math.max(0, source.buffer.duration - 0.02));
+      source.start(when, sourceOffset);
+      return;
+    }
+    source.start(when);
+  });
+  if (sources[0]) {
+    sources[0].onended = onEnded;
+  }
+}
+
+function scheduleGraphGainCurve(graph, fromGain, toGain, now, seconds, direction, curveType = "equalPower") {
+  if (!graph || !graph.master) return;
+  const gain = graph.master.gain;
+  const duration = Math.max(0.04, seconds);
+  const from = Number.isFinite(fromGain) ? fromGain : gain.value;
+  const to = Number.isFinite(toGain) ? toGain : gain.value;
+  const curve = curveType === "linear"
+    ? buildLinearGainCurve(from, to)
+    : buildEqualPowerGainCurve(from, to, direction);
+
+  gain.cancelScheduledValues(now);
+  gain.setValueAtTime(curve[0], now);
+  try {
+    gain.setValueCurveAtTime(curve, now, duration);
+  } catch (curveError) {
+    gain.linearRampToValueAtTime(to, now + duration);
+  }
+  gain.setTargetAtTime(to, now + duration + 0.006, 0.012);
+  graph.gainAutomation = {
+    direction,
+    from,
+    to,
+    startTime: now,
+    endTime: now + duration,
+    curveType
+  };
+}
+
+function buildLinearGainCurve(from, to) {
+  const points = 64;
+  const curve = new Float32Array(points);
+  for (let index = 0; index < points; index += 1) {
+    const ratio = index / (points - 1);
+    curve[index] = from + (to - from) * ratio;
+  }
+  curve[0] = from;
+  curve[points - 1] = to;
+  return curve;
+}
+
+function buildEqualPowerGainCurve(from, to, direction) {
+  const points = 64;
+  const curve = new Float32Array(points);
+  for (let index = 0; index < points; index += 1) {
+    const ratio = index / (points - 1);
+    if (direction === "out") {
+      curve[index] = to + (from - to) * Math.cos(ratio * Math.PI * 0.5);
+    } else {
+      curve[index] = from + (to - from) * Math.sin(ratio * Math.PI * 0.5);
+    }
+  }
+  curve[0] = from;
+  curve[points - 1] = to;
+  return curve;
+}
+
+function getGraphCurrentGain(graph, time) {
+  if (!graph || !graph.master) return getGraphTargetGain(graph);
+  const automation = graph.gainAutomation;
+  if (!automation) return graph.master.gain.value;
+  if (time <= automation.startTime) return automation.from;
+  if (time >= automation.endTime) return automation.to;
+  const ratio = clamp((time - automation.startTime) / Math.max(0.001, automation.endTime - automation.startTime), 0, 1);
+  if (automation.curveType === "linear") {
+    return automation.from + (automation.to - automation.from) * ratio;
+  }
+  if (automation.direction === "out") {
+    return automation.to + (automation.from - automation.to) * Math.cos(ratio * Math.PI * 0.5);
+  }
+  return automation.from + (automation.to - automation.from) * Math.sin(ratio * Math.PI * 0.5);
+}
+
+function getGraphTargetGain(graph) {
+  const scale = graph && Number.isFinite(graph.outputGainScale) ? graph.outputGainScale : 1;
+  return scale;
+}
+
+function retireGraphAfterFade(graph, seconds) {
+  if (!graph) return;
+  const sources = graph.sources || [graph.source];
+  sources.forEach((source) => {
+    source.onended = null;
+  });
+  const timer = window.setTimeout(() => {
+    disposeGraph(graph);
+    state.retiredGraphs = state.retiredGraphs.filter((item) => item.graph !== graph);
+  }, Math.max(0, seconds * 1000 + 80));
+  state.retiredGraphs.push({ graph, timer });
+}
+
+function disposeGraph(graph) {
+  if (!graph || graph.disposed) return;
+  graph.disposed = true;
+  const sources = graph.sources || [graph.source];
+  sources.forEach((source) => {
+    if (!source) return;
+    try {
+      source.onended = null;
+      source.stop();
+    } catch (stopError) {
+      // Source may already be stopped.
+    }
+    try {
+      source.disconnect();
+    } catch (disconnectError) {
+      // Source may already be disconnected.
+    }
+  });
+  disconnectGraph(graph);
+  graph.previousLiveScores = {};
+  graph.livePowerData = null;
+  graph.frequencyData = null;
+  graph.timeData = null;
+  graph.stemAnalysisMeters = null;
+  graph.spatialLayer = null;
 }
 
 function stopPlayback(options = {}) {
   const { keepOffset = false, silent = false } = options;
+  state.retiredGraphs.forEach((item) => {
+    window.clearTimeout(item.timer);
+    disposeGraph(item.graph);
+  });
+  state.retiredGraphs = [];
   if (state.graph) {
-    const sources = state.graph.sources || [state.graph.source];
-    sources.forEach((source) => {
-      try {
-        source.onended = null;
-        source.stop();
-      } catch (stopError) {
-        // Source may already be stopped.
-      }
-    });
-    disconnectGraph(state.graph);
+    disposeGraph(state.graph);
     state.graph = null;
   }
   if (state.animationId) {
     cancelAnimationFrame(state.animationId);
     state.animationId = 0;
   }
+  state.lastMeterFrameTime = -1;
+  state.lastStemDisplayFrameTime = -1;
+  state.lastFieldDisplayFrameTime = -1;
+  state.lastSpectrumFrameTime = -1;
+  state.lastSeekFrameTime = -1;
+  state.lastVisualFrameAt = 0;
+  resetLiveAnalysisCache();
   if (!keepOffset) {
     state.offset = 0;
     Object.keys(state.meterLevels).forEach((id) => {
       state.meterLevels[id] = 0;
+    });
+    Object.keys(state.fieldLevels).forEach((id) => {
+      state.fieldLevels[id] = 0;
     });
   }
   state.playing = false;
   refs.playButton.textContent = "▶";
   if (!silent) {
     drawWaveform(state.offset);
-    updateRealtimeDisplay(state.offset);
-    updateSeek(state.offset);
+    if (state.mode === "original") {
+      setRealtimeMetersToZero(state.offset);
+      updateSpectrumDisplay(state.offset, { zero: true });
+    } else {
+      updateRealtimeDisplay(state.offset);
+      updateSpectrumDisplay(state.offset, { zero: true });
+    }
+    updateSeek(state.offset, { force: true });
   }
 }
 
 function createPlaybackGraph(context, buffer, analysis, mode) {
-  if (mode === "original") {
-    return createOriginalGraph(context, buffer, analysis);
+  if (mode === "spatial") {
+    return createSpatialPlaybackGraph(context, buffer, analysis);
   }
-  if (state.stemBuffers && Object.keys(state.stemBuffers).length) {
-    return createStemSpatialGraph(context, buffer, analysis);
-  }
-  return createAnalysisFallbackGraph(context, buffer, analysis);
+  return createOriginalPlaybackGraph(context, buffer, analysis);
 }
 
-function createOutputChain(context, mode) {
+function createPassthroughOutputChain(context) {
+  const input = context.createGain();
   const master = context.createGain();
-  const compressor = context.createDynamicsCompressor();
-  const limiter = context.createDynamicsCompressor();
+  const outputGainScale = 1;
+  master.gain.value = outputGainScale;
+  input.connect(master);
+  master.connect(context.destination);
 
-  compressor.threshold.value = -13;
-  compressor.knee.value = 9;
-  compressor.ratio.value = 1.65;
-  compressor.attack.value = 0.008;
-  compressor.release.value = 0.15;
-
-  limiter.threshold.value = -2.2;
-  limiter.knee.value = 1.5;
-  limiter.ratio.value = 13;
-  limiter.attack.value = 0.002;
-  limiter.release.value = 0.075;
-
-  master.gain.value = state.settings.gain;
-  compressor.connect(limiter).connect(master).connect(context.destination);
   const liveMeter = createLiveInstrumentMeter(context, master);
   return {
+    mode: "spatial",
+    outputGainScale,
+    input,
     master,
-    compressor,
-    limiter,
     liveMeter,
-    nodes: [master, compressor, limiter, ...liveMeter.nodes]
+    nodes: [input, master, ...liveMeter.nodes]
   };
 }
 
-function createOriginalGraph(context, buffer, analysis) {
+function createOriginalPlaybackGraph(context, buffer, analysis) {
   const source = context.createBufferSource();
+  const master = context.createGain();
   source.buffer = buffer;
-  const sourceInput = context.createGain();
-  source.connect(sourceInput);
-
-  const output = createOutputChain(context, "original");
-  const remasterChain = createAutoRemasterChain(context, sourceInput, analysis, "original");
-  remasterChain.output.connect(output.compressor);
+  master.gain.value = 1;
+  source.connect(master).connect(context.destination);
+  const liveMeter = createLiveInstrumentMeter(context, master);
 
   return {
+    mode: "original",
     source,
     sources: [source],
-    master: output.master,
-    remasterControls: remasterChain.controls,
-    analyser: output.liveMeter.analyser,
-    frequencyData: output.liveMeter.frequencyData,
-    timeData: output.liveMeter.timeData,
+    master,
+    outputGainScale: 1,
+    analyser: liveMeter.analyser,
+    frequencyData: liveMeter.frequencyData,
+    timeData: liveMeter.timeData,
     previousLiveScores: {},
-    nodes: [sourceInput, ...remasterChain.nodes, ...output.nodes]
+    nodes: [master, ...liveMeter.nodes]
   };
 }
 
-function createStemSpatialGraph(context, buffer, analysis) {
-  const output = createOutputChain(context, "spatial");
-  const originalSource = context.createBufferSource();
-  originalSource.buffer = buffer;
-  originalSource.connect(output.compressor);
-
-  const spatialBus = context.createGain();
-  spatialBus.gain.value = 0.52;
-  spatialBus.connect(output.compressor);
-
-  const roomInput = createRoomInputFilter(context);
-  const convolver = context.createConvolver();
-  convolver.buffer = createImpulseResponse(context, state.settings.room);
-  const reverbGain = context.createGain();
-  reverbGain.gain.value = state.settings.room * 0.2;
-  roomInput.output.connect(convolver);
-  convolver.connect(reverbGain).connect(output.compressor);
-  const originalRoomSend = context.createGain();
-  originalRoomSend.gain.value = 0.2;
-  originalSource.connect(originalRoomSend).connect(roomInput.input);
-  const concertHall = state.settings.concertHall
-    ? createConcertHallLayer(context, originalSource, output.compressor)
-    : null;
-
-  const sources = [originalSource];
-  const stemPanners = {};
-  const spatialObjects = [];
-  const earlyReflections = [];
-  const spatialMeters = createSpatialStemMeters(context);
-  const nodes = [originalSource, originalRoomSend, spatialBus, ...roomInput.nodes, convolver, reverbGain, ...output.nodes, ...spatialMeters.nodes];
-  if (concertHall) nodes.push(...concertHall.nodes);
-  earlyReflections.push(...connectHallReflections(context, originalSource, spatialBus));
-
-  getDisplayObjects(analysis).forEach((stem) => {
-    const source = context.createBufferSource();
-    source.buffer = stem.buffer;
-
-    const inputGain = context.createGain();
-    inputGain.gain.value = getStemAmbienceGain(stem);
-    const tone = createStemToneStack(context, stem);
-    const roomSend = context.createGain();
-    roomSend.gain.value = stem.send;
-
-    source.connect(inputGain).connect(tone.input);
-    tone.output.connect(roomSend).connect(roomInput.input);
-    tone.output.connect(spatialMeters.byId[stem.id].input);
-    earlyReflections.push(...connectEarlyReflections(context, tone.output, spatialBus, stem));
-
-    sources.push(source);
-    spatialObjects.push(stem);
-    nodes.push(source, inputGain, ...tone.nodes, roomSend);
-  });
-
-  earlyReflections.forEach((reflection) => nodes.push(...reflection.nodes));
-
-  return {
-    source: originalSource,
-    sources,
-    master: output.master,
-    reverbGain,
-    concertHall,
-    concertHallSource: originalSource,
-    concertHallOutput: output.compressor,
-    spatialMeters,
-    spatialObjects,
-    stemPanners,
-    earlyReflections,
-    analyser: output.liveMeter.analyser,
-    frequencyData: output.liveMeter.frequencyData,
-    timeData: output.liveMeter.timeData,
-    previousLiveScores: {},
-    nodes
-  };
-}
-
-function createAnalysisFallbackGraph(context, buffer, analysis) {
+function createSpatialPlaybackGraph(context, buffer, analysis) {
   const source = context.createBufferSource();
   source.buffer = buffer;
-  const output = createOutputChain(context, "spatial");
-  source.connect(output.compressor);
+  const output = createPassthroughOutputChain(context);
 
-  const spatialBus = context.createGain();
-  spatialBus.gain.value = 0.48;
-  spatialBus.connect(output.compressor);
+  const spatialLayer = createSpatialWetLayer(context, {
+    mixSource: source,
+    output: output.input,
+    analysis
+  });
+  const outputGainScale = 1;
+  output.outputGainScale = outputGainScale;
+  output.master.gain.value = outputGainScale;
 
-  const ambienceSend = context.createGain();
-  ambienceSend.gain.value = 0.26;
-  source.connect(ambienceSend);
-  const roomInput = createRoomInputFilter(context);
-  const convolver = context.createConvolver();
-  convolver.buffer = createImpulseResponse(context, state.settings.room);
-  const reverbGain = context.createGain();
-  reverbGain.gain.value = state.settings.room * 0.18;
-  ambienceSend.connect(roomInput.input);
-  roomInput.output.connect(convolver);
-  convolver.connect(reverbGain).connect(output.compressor);
+  return {
+    mode: "spatial",
+    source,
+    sources: [source, ...spatialLayer.sources],
+    master: output.master,
+    outputGainScale,
+    analyser: output.liveMeter.analyser,
+    frequencyData: output.liveMeter.frequencyData,
+    timeData: output.liveMeter.timeData,
+    stemAnalysisMeters: spatialLayer.stemAnalysisMeters,
+    previousLiveScores: {},
+    spatialLayer,
+    nodes: [...spatialLayer.nodes, ...output.nodes]
+  };
+}
+
+function createSpatialWetLayer(context, options) {
+  const { mixSource, output, analysis } = options;
+  const settings = state.spatialSettings;
+  const measuredBrir = hasMeasuredBrirLibrary();
+  const wetMaster = context.createGain();
+  const centerStageBus = context.createGain();
+  const reflectionBus = context.createGain();
+  const lateralBus = context.createGain();
+  const fullBandAnchorBus = context.createGain();
+  const originalAnchorSend = context.createGain();
+  const stemItems = getSpatialStemItems(analysis);
+  const usesOriginalAnchor = true;
+
+  const spaceLift = 1 + (SPATIAL_SPACE_MULTIPLIER - 1);
+  const nearFieldLift = 1 + (spaceLift - 1) * 0.16;
+  const wideFieldLift = (1 + (spaceLift - 1) * 0.18) * (0.94 + SPATIAL_SIDE_ENERGY_SCALE * 0.06);
+
+  const baseWetGain = getSpatialWetGain(settings) * SPATIAL_FIRST_WET_SCALE * (measuredBrir ? 1.02 : 0.96) * nearFieldLift;
+  wetMaster.gain.value = baseWetGain;
+  fullBandAnchorBus.gain.value = 1;
+  originalAnchorSend.gain.value = 1;
+  centerStageBus.gain.value = getSpatialCenterStageGain(settings) * (measuredBrir ? 0.13 : 0.1) * nearFieldLift;
+  reflectionBus.gain.value = getSpatialReflectionGain(settings) * (measuredBrir ? 0.16 : 0.14) * wideFieldLift;
+  lateralBus.gain.value = getSpatialLateralGain(settings, analysis) * wideFieldLift * 0.86;
+
+  centerStageBus.connect(wetMaster);
+  reflectionBus.connect(wetMaster);
+  lateralBus.connect(wetMaster);
+  mixSource.connect(originalAnchorSend).connect(fullBandAnchorBus);
+  fullBandAnchorBus.connect(output);
+  wetMaster.connect(output);
 
   const nodes = [
-    source,
-    spatialBus,
-    ambienceSend,
-    ...roomInput.nodes,
-    convolver,
-    reverbGain,
-    ...output.nodes
+    wetMaster,
+    centerStageBus,
+    reflectionBus,
+    lateralBus,
+    fullBandAnchorBus,
+    originalAnchorSend
   ];
-  const earlyReflections = connectHallReflections(context, source, spatialBus);
-  earlyReflections.forEach((reflection) => nodes.push(...reflection.nodes));
-  const concertHall = state.settings.concertHall
-    ? createConcertHallLayer(context, source, output.compressor)
-    : null;
-  if (concertHall) nodes.push(...concertHall.nodes);
+  const sources = [];
+  const stemAnalysisMeters = { byId: {}, nodes: [] };
+
+  if (stemItems.length) {
+    stemItems.forEach((stem) => {
+      const stemSource = context.createBufferSource();
+      stemSource.buffer = stem.buffer;
+      sources.push(stemSource);
+      const meter = createStemMeterTap(context, stemSource);
+      nodes.push(...meter.nodes);
+      stemAnalysisMeters.byId[stem.id] = meter;
+    });
+  }
+
+  const spatialSource = mixSource;
+  const centerStage = createCenterStagePresenceLayer(context, spatialSource, centerStageBus, { measuredBrir });
+  const field = createDiffuseFieldLayer(context, spatialSource, reflectionBus, { measuredBrir });
+  const lateral = createLateralSideExpansionLayer(context, spatialSource, lateralBus, { analysis, channelCount: 2 });
+  nodes.push(...centerStage.nodes, ...field.nodes, ...lateral.nodes);
 
   return {
-    source,
-    sources: [source],
-    master: output.master,
-    reverbGain,
-    concertHall,
-    concertHallSource: source,
-    concertHallOutput: output.compressor,
-    earlyReflections,
-    analyser: output.liveMeter.analyser,
-    frequencyData: output.liveMeter.frequencyData,
-    timeData: output.liveMeter.timeData,
-    previousLiveScores: {},
+    sources,
+    wetMaster,
+    baseWetGain,
+    centerStageBus,
+    reflectionBus,
+    lateralBus,
+    fullBandAnchorBus,
+    originalAnchorSend,
+    usesOriginalAnchor,
+    stemAnalysisMeters,
+    centerStage,
+    field,
+    lateral,
     nodes
   };
 }
 
-function createHrtfPanner(context, position) {
-  const panner = context.createPanner();
-  panner.panningModel = "HRTF";
-  panner.distanceModel = "inverse";
-  panner.refDistance = 1.15;
-  panner.maxDistance = 18;
-  panner.rolloffFactor = 0.52;
-  setPannerPosition(panner, position, context.currentTime);
-  return panner;
+function getSpatialStemItems(analysis) {
+  if (!state.stemBuffers) return [];
+  return Object.values(state.stemBuffers)
+    .filter((stem) => stem && stem.buffer)
+    .sort((a, b) => STEM_ORDER.indexOf(a.id) - STEM_ORDER.indexOf(b.id));
 }
 
-function getStemAmbienceGain(stem) {
-  if (stem.id === "bass") return 0.05;
-  if (stem.id === "drums") return 0.3;
-  if (stem.id === "vocals") return 0.24;
-  return 0.34;
-}
+function createLateralSideExpansionLayer(context, source, output, options = {}) {
+  const channelCount = source?.buffer?.numberOfChannels || options.channelCount || 2;
+  if (!source || channelCount < 2) {
+    return createEmptySpatialLayer();
+  }
 
-function createStemToneStack(context, stem) {
-  const input = context.createGain();
-  const lowShelf = context.createBiquadFilter();
-  const highpass = context.createBiquadFilter();
-  const body = context.createBiquadFilter();
-  const presence = context.createBiquadFilter();
-  const air = context.createBiquadFilter();
+  const splitter = context.createChannelSplitter(2);
+  const leftSide = context.createGain();
+  const rightSide = context.createGain();
+  const sideSum = context.createGain();
+  const allpassA = context.createBiquadFilter();
+  const allpassB = context.createBiquadFilter();
+  const leftOut = context.createGain();
+  const rightOut = context.createGain();
+  const merger = context.createChannelMerger(2);
+  const stereoWidth = clamp(Number(options.analysis?.stereoImage?.width) || 0.36, 0, 1);
+  const sideLift = clamp(
+    (0.72 + (1 - stereoWidth) * 0.34 + state.spatialSettings.radius * 0.18) * SPATIAL_SIDE_ENERGY_SCALE,
+    0.84,
+    1.38
+  );
 
-  lowShelf.type = "lowshelf";
-  lowShelf.frequency.value = stem.lowShelfHz || 180;
-  lowShelf.gain.value = stem.lowShelfGain || 0;
+  leftSide.gain.value = 0.5;
+  rightSide.gain.value = -0.5;
+  sideSum.gain.value = 1;
+  allpassA.type = "allpass";
+  allpassA.frequency.value = 680;
+  allpassA.Q.value = 0.72;
+  allpassB.type = "allpass";
+  allpassB.frequency.value = 2450;
+  allpassB.Q.value = 0.54;
+  leftOut.gain.value = 0.72 * sideLift;
+  rightOut.gain.value = -0.72 * sideLift;
 
-  highpass.type = "highpass";
-  highpass.frequency.value = stem.highpass;
-  highpass.Q.value = 0.7;
-
-  body.type = "peaking";
-  body.frequency.value = stem.bodyHz;
-  body.Q.value = 0.75;
-  body.gain.value = stem.bodyGain;
-
-  presence.type = "peaking";
-  presence.frequency.value = 3600;
-  presence.Q.value = 0.9;
-  presence.gain.value = stem.id === "bass" ? -0.45 : 0.15;
-
-  air.type = "highshelf";
-  air.frequency.value = 7600;
-  air.gain.value = stem.airGain;
-
-  input.connect(lowShelf).connect(highpass).connect(body).connect(presence).connect(air);
-  return {
-    input,
-    output: air,
-    nodes: [input, lowShelf, highpass, body, presence, air]
-  };
-}
-
-function createRoomInputFilter(context) {
-  const input = context.createGain();
-  const highpass = context.createBiquadFilter();
-  const presence = context.createBiquadFilter();
-  const air = context.createBiquadFilter();
-
-  highpass.type = "highpass";
-  highpass.frequency.value = 230;
-  highpass.Q.value = 0.72;
-
-  presence.type = "peaking";
-  presence.frequency.value = 3100;
-  presence.Q.value = 0.8;
-  presence.gain.value = 1.15;
-
-  air.type = "highshelf";
-  air.frequency.value = 7600;
-  air.gain.value = 0.9;
-
-  input.connect(highpass).connect(presence).connect(air);
-  return {
-    input,
-    output: air,
-    nodes: [input, highpass, presence, air]
-  };
-}
-
-function createSpatialStemMeters(context) {
-  const silentTap = context.createGain();
-  silentTap.gain.value = 0;
-  silentTap.connect(context.destination);
-  const byId = {};
-  const nodes = [silentTap];
-
-  Object.values(state.stemBuffers || {}).forEach((stem) => {
-    const input = context.createGain();
-    const analyser = context.createAnalyser();
-    analyser.fftSize = 1024;
-    analyser.minDecibels = -94;
-    analyser.maxDecibels = -12;
-    analyser.smoothingTimeConstant = 0.08;
-    input.connect(analyser).connect(silentTap);
-    byId[stem.id] = {
-      stem,
-      input,
-      analyser,
-      timeData: new Float32Array(analyser.fftSize)
-    };
-    nodes.push(input, analyser);
-  });
-
-  return { byId, nodes };
-}
-
-function connectHallReflections(context, input, output) {
-  const taps = [
-    { position: { x: -2.7, y: 0.34, z: -2.4 }, delay: 0.018, gain: 0.06 },
-    { position: { x: 2.7, y: 0.34, z: -2.5 }, delay: 0.024, gain: 0.055 },
-    { position: { x: -3.35, y: 0.48, z: -4.15 }, delay: 0.041, gain: 0.052 },
-    { position: { x: 3.35, y: 0.48, z: -4.05 }, delay: 0.047, gain: 0.05 },
-    { position: { x: -1.2, y: 0.72, z: -5.35 }, delay: 0.068, gain: 0.038 },
-    { position: { x: 1.2, y: 0.72, z: -5.55 }, delay: 0.074, gain: 0.036 }
-  ];
-
-  return taps.map((tap, index) => {
-    const filter = createReflectionFilter(context);
-    const delay = context.createDelay(0.12);
-    const gain = context.createGain();
-    const panner = createHrtfPanner(context, tap.position);
-    delay.delayTime.value = tap.delay;
-    gain.gain.value = state.settings.room * tap.gain;
-    input.connect(filter.input);
-    filter.output.connect(delay).connect(gain).connect(panner).connect(output);
-    return {
-      kind: "hall",
-      index,
-      baseGain: tap.gain,
-      position: tap.position,
-      gain,
-      panner,
-      nodes: [...filter.nodes, delay, gain, panner]
-    };
-  });
-}
-
-function getConcertHallAmount() {
-  return state.settings.concertHall ? 1 : 0;
-}
-
-function createConcertHallLayer(context, input, output) {
-  const send = context.createGain();
-  send.gain.value = getConcertHallAmount();
-
-  const roomInput = createConcertHallInputFilter(context);
-  const preDelay = context.createDelay(0.22);
-  preDelay.delayTime.value = 0.036;
-  const convolver = context.createConvolver();
-  convolver.buffer = createConcertHallImpulse(context);
-  const reverbTone = createConcertHallOutputFilter(context);
-  const reverbGain = context.createGain();
-  reverbGain.gain.value = getConcertHallAmount() * state.settings.room * 0.28;
-
-  input.connect(send);
-  send.connect(roomInput.input);
-  roomInput.output.connect(preDelay).connect(convolver).connect(reverbTone.input);
-  reverbTone.output.connect(reverbGain).connect(output);
-
-  const reflectionBus = context.createGain();
-  reflectionBus.gain.value = getConcertHallAmount() * 0.38;
-  reflectionBus.connect(output);
-  const reflections = connectConcertHallReflections(context, send, reflectionBus);
+  source.connect(splitter);
+  splitter.connect(leftSide, 0);
+  splitter.connect(rightSide, 1);
+  leftSide.connect(sideSum);
+  rightSide.connect(sideSum);
+  sideSum
+    .connect(allpassA)
+    .connect(allpassB);
+  allpassB.connect(leftOut).connect(merger, 0, 0);
+  allpassB.connect(rightOut).connect(merger, 0, 1);
+  merger.connect(output);
 
   return {
-    send,
-    reverbGain,
-    reflectionBus,
-    reflections,
+    send: sideSum,
+    taps: [],
+    sources: [],
     nodes: [
-      send,
-      ...roomInput.nodes,
-      preDelay,
-      convolver,
-      ...reverbTone.nodes,
-      reverbGain,
-      reflectionBus,
-      ...reflections.flatMap((reflection) => reflection.nodes)
+      splitter,
+      leftSide,
+      rightSide,
+      sideSum,
+      allpassA,
+      allpassB,
+      leftOut,
+      rightOut,
+      merger
     ]
   };
 }
 
-function createConcertHallInputFilter(context) {
-  const input = context.createGain();
-  const highpass = context.createBiquadFilter();
-  const lowMidControl = context.createBiquadFilter();
-  const presence = context.createBiquadFilter();
-  const air = context.createBiquadFilter();
-
-  highpass.type = "highpass";
-  highpass.frequency.value = 360;
-  highpass.Q.value = 0.72;
-
-  lowMidControl.type = "peaking";
-  lowMidControl.frequency.value = 430;
-  lowMidControl.Q.value = 0.82;
-  lowMidControl.gain.value = -0.65;
-
-  presence.type = "peaking";
-  presence.frequency.value = 2600;
-  presence.Q.value = 0.74;
-  presence.gain.value = 0.38;
-
-  air.type = "highshelf";
-  air.frequency.value = 7200;
-  air.gain.value = 0.42;
-
-  input.connect(highpass).connect(lowMidControl).connect(presence).connect(air);
+function createStemMeterTap(context, input) {
+  const analyser = context.createAnalyser();
+  analyser.fftSize = STEM_METER_FFT_SIZE;
+  analyser.minDecibels = -92;
+  analyser.maxDecibels = -10;
+  analyser.smoothingTimeConstant = 0.16;
+  const silentTap = context.createGain();
+  silentTap.gain.value = 0;
+  input.connect(analyser);
+  analyser.connect(silentTap).connect(context.destination);
   return {
-    input,
-    output: air,
-    nodes: [input, highpass, lowMidControl, presence, air]
+    analyser,
+    timeData: new Float32Array(analyser.fftSize),
+    nodes: [analyser, silentTap]
   };
 }
 
-function createConcertHallOutputFilter(context) {
-  const input = context.createGain();
-  const highpass = context.createBiquadFilter();
-  const lowMidControl = context.createBiquadFilter();
-  const deharsh = context.createBiquadFilter();
-  const air = context.createBiquadFilter();
+function createCenterStagePresenceLayer(context, source, output, options = {}) {
+  const splitter = context.createChannelSplitter(2);
+  const leftMid = context.createGain();
+  const rightMid = context.createGain();
+  const mid = context.createGain();
+  const send = context.createGain();
+  const nodes = [splitter, leftMid, rightMid, mid, send];
+  const taps = [];
+  const channelCount = source.buffer && source.buffer.numberOfChannels ? source.buffer.numberOfChannels : 2;
 
-  highpass.type = "highpass";
-  highpass.frequency.value = 280;
-  highpass.Q.value = 0.7;
+  leftMid.gain.value = channelCount > 1 ? 0.5 : 1;
+  rightMid.gain.value = channelCount > 1 ? 0.5 : 0;
+  mid.gain.value = 1;
+  send.gain.value = options.measuredBrir ? 0.029 : 0.023;
 
-  lowMidControl.type = "peaking";
-  lowMidControl.frequency.value = 520;
-  lowMidControl.Q.value = 0.9;
-  lowMidControl.gain.value = -0.72;
+  source.connect(splitter);
+  splitter.connect(leftMid, 0);
+  if (channelCount > 1) {
+    splitter.connect(rightMid, 1);
+  }
+  leftMid.connect(mid);
+  rightMid.connect(mid);
+  mid.connect(send);
 
-  deharsh.type = "peaking";
-  deharsh.frequency.value = 3900;
-  deharsh.Q.value = 1.15;
-  deharsh.gain.value = -0.22;
-
-  air.type = "highshelf";
-  air.frequency.value = 6800;
-  air.gain.value = 0.32;
-
-  input.connect(highpass).connect(lowMidControl).connect(deharsh).connect(air);
-  return {
-    input,
-    output: air,
-    nodes: [input, highpass, lowMidControl, deharsh, air]
-  };
-}
-
-function connectConcertHallReflections(context, input, output) {
-  const taps = [
-    { position: { x: -4.2, y: 0.82, z: -6.2 }, delay: 0.086, gain: 0.044 },
-    { position: { x: 4.15, y: 0.82, z: -6.05 }, delay: 0.096, gain: 0.042 },
-    { position: { x: -5.3, y: 1.08, z: -7.4 }, delay: 0.118, gain: 0.037 },
-    { position: { x: 5.25, y: 1.08, z: -7.2 }, delay: 0.129, gain: 0.036 },
-    { position: { x: -2.6, y: 1.46, z: -8.8 }, delay: 0.152, gain: 0.031 },
-    { position: { x: 2.55, y: 1.46, z: -8.95 }, delay: 0.164, gain: 0.03 },
-    { position: { x: -0.9, y: 1.9, z: -10.1 }, delay: 0.188, gain: 0.024 },
-    { position: { x: 0.95, y: 1.9, z: -10.35 }, delay: 0.204, gain: 0.023 }
-  ];
-
-  return taps.map((tap, index) => {
-    const filter = createConcertHallReflectionFilter(context);
-    const delay = context.createDelay(0.26);
-    const gain = context.createGain();
-    const panner = createHrtfPanner(context, tap.position);
-    delay.delayTime.value = tap.delay;
-    gain.gain.value = getConcertHallAmount() * state.settings.room * tap.gain;
-    input.connect(filter.input);
-    filter.output.connect(delay).connect(gain).connect(panner).connect(output);
-    return {
-      kind: "concertHall",
-      index,
-      baseGain: tap.gain,
-      position: tap.position,
-      gain,
-      panner,
-      nodes: [...filter.nodes, delay, gain, panner]
-    };
-  });
-}
-
-function createConcertHallReflectionFilter(context) {
-  const input = context.createGain();
-  const highpass = context.createBiquadFilter();
-  const lowMidControl = context.createBiquadFilter();
-  const air = context.createBiquadFilter();
-
-  highpass.type = "highpass";
-  highpass.frequency.value = 430;
-  highpass.Q.value = 0.72;
-
-  lowMidControl.type = "peaking";
-  lowMidControl.frequency.value = 650;
-  lowMidControl.Q.value = 0.86;
-  lowMidControl.gain.value = -0.48;
-
-  air.type = "highshelf";
-  air.frequency.value = 7600;
-  air.gain.value = 0.26;
-
-  input.connect(highpass).connect(lowMidControl).connect(air);
-  return {
-    input,
-    output: air,
-    nodes: [input, highpass, lowMidControl, air]
-  };
-}
-
-function createReflectionFilter(context) {
-  const input = context.createGain();
-  const highpass = context.createBiquadFilter();
-  const presence = context.createBiquadFilter();
-  const air = context.createBiquadFilter();
-
-  highpass.type = "highpass";
-  highpass.frequency.value = 340;
-  highpass.Q.value = 0.7;
-
-  presence.type = "peaking";
-  presence.frequency.value = 2600;
-  presence.Q.value = 0.85;
-  presence.gain.value = 0.6;
-
-  air.type = "highshelf";
-  air.frequency.value = 7800;
-  air.gain.value = 0.55;
-
-  input.connect(highpass).connect(presence).connect(air);
-  return {
-    input,
-    output: air,
-    nodes: [input, highpass, presence, air]
-  };
-}
-
-function connectEarlyReflections(context, input, output, stem) {
-  return [-1, 1, -0.55, 0.55].map((side, index) => {
-    const delay = context.createDelay(0.08);
-    const gain = context.createGain();
-    const panner = createHrtfPanner(context, {
-      x: stem.position.x + side * (1.55 + state.settings.width * 0.48),
-      y: stem.position.y * 0.68 + (index > 1 ? 0.08 : 0),
-      z: stem.position.z - 0.82 - index * 0.18
+  SPATIAL_CENTER_STAGE_DIRECTIONS.forEach((direction) => {
+    const tap = createPannedDelayTap(context, send, output, direction, {
+      maxDelay: 0.06,
+      delayScale: getFarFieldDelayScale(options, "center"),
+      gainScale: getCenterStageTapGainScale(direction, options),
+      panScale: 1.3 * SPATIAL_NATURAL_PAN_SCALE
     });
-    delay.delayTime.value = 0.014 + index * 0.011 + Math.abs(stem.position.x) * 0.002;
-    const bassTrim = stem.id === "bass" ? 0.2 : 1;
-    gain.gain.value = state.settings.room * (0.024 + stem.send * 0.036) * bassTrim;
-    input.connect(delay).connect(gain).connect(panner).connect(output);
-    return { gain, panner, stem, side, index, nodes: [delay, gain, panner] };
+    taps.push({ direction, ...tap, baseGain: direction.gain });
+    nodes.push(...tap.nodes);
   });
+
+  return { send, taps, nodes };
+}
+
+function createDiffuseFieldLayer(context, source, output, options = {}) {
+  const send = context.createGain();
+  const nodes = [send];
+  const taps = [];
+  const directions = SPATIAL_FIELD_DIRECTIONS;
+
+  send.gain.value = options.measuredBrir ? 0.036 : 0.05;
+  source.connect(send);
+
+  directions.forEach((direction, index) => {
+    const gainScale = getSurroundTapGainScale(direction, options, "field");
+    const delayScale = getFarFieldDelayScale(options, "field");
+    if (!shouldUseHrtfTap(direction, "field")) {
+      const tap = createPannedDelayTap(context, send, output, direction, {
+        maxDelay: 0.055,
+        delayScale,
+        gainScale: gainScale * 0.44,
+        panScale: 1.26 * SPATIAL_NATURAL_PAN_SCALE
+      });
+      taps.push({ direction, ...tap, baseGain: direction.gain });
+      nodes.push(...tap.nodes);
+      return;
+    }
+
+    const delay = context.createDelay(0.06);
+    const gain = context.createGain();
+    const position = getInterpolatedHrtfPosition(direction);
+    const renderer = createReferenceHrtfRenderer(context, position, {
+      role: "reflection",
+      seed: index + 17,
+      forceSynthetic: false
+    });
+    delay.delayTime.value = direction.delay * delayScale;
+    gain.gain.value = direction.gain * gainScale * 0.72;
+    send.connect(delay).connect(gain).connect(renderer.node).connect(output);
+    taps.push({ direction, delay, gain, renderer: renderer.node, rendererMode: renderer.mode, baseGain: direction.gain });
+    nodes.push(delay, gain, renderer.node);
+  });
+
+  return { send, taps, nodes };
+}
+
+function getInterpolatedHrtfPosition(position, options = {}) {
+  const radius = state.spatialSettings.radius;
+  const expansive = options.expansive ? 1 : 0;
+  const stage = options.stage ? 1 : 0;
+  const widthLift = (1 + (SPATIAL_SPACE_MULTIPLIER - 1) * 0.28) * SPATIAL_WIDTH_MULTIPLIER;
+  const heightLift = 1 + (SPATIAL_SPACE_MULTIPLIER - 1) * 0.24;
+  const distanceLift = 1 + (SPATIAL_SPACE_MULTIPLIER - 1) * 0.42;
+  const azimuthInput = (position.azimuth || 0) *
+    (1 + radius * (0.2 + expansive * 0.12 + stage * 0.03) * widthLift);
+  const azimuth = softLimit(azimuthInput, SPATIAL_MAX_RENDER_AZIMUTH);
+  const elevation = clamp((position.elevation || 0) * (0.98 + radius * (0.18 + expansive * 0.09 + stage * 0.03) * heightLift), -68, 84);
+  const distance = clamp(
+    (position.distance || 1.25) *
+      (1.16 + radius * (0.62 + expansive * 0.34 + stage * 0.1) * distanceLift) *
+      SPATIAL_DISTANCE_ENVELOPMENT,
+    0.92,
+    expansive ? 24 : 20
+  );
+  return { azimuth, elevation, distance };
+}
+
+function softLimit(value, limit) {
+  if (!Number.isFinite(value) || !Number.isFinite(limit) || limit <= 0) return 0;
+  return limit * Math.tanh(value / limit);
+}
+
+function createBinauralRendererImpulse(context, position, options = {}) {
+  return createSyntheticHrtfImpulse(context, position, options);
+}
+
+function createReferenceHrtfRenderer(context, position, options = {}) {
+  if (typeof context.createPanner === "function" && options.forceSynthetic !== true) {
+    const panner = context.createPanner();
+    configureReferenceHrtfPanner(context, panner, position, options);
+    return { node: panner, mode: "native-hrtf" };
+  }
+
+  const convolver = context.createConvolver();
+  convolver.normalize = false;
+  convolver.buffer = createBinauralRendererImpulse(context, position, options);
+  return { node: convolver, mode: "synthetic-fir" };
+}
+
+function configureReferenceHrtfPanner(context, panner, position, options = {}) {
+  const cartesian = sphericalToListenerCoordinates(position);
+  panner.panningModel = "HRTF";
+  panner.distanceModel = "linear";
+  panner.refDistance = 1;
+  panner.maxDistance = 10000;
+  panner.rolloffFactor = Number.isFinite(options.rolloffFactor) ? options.rolloffFactor : 0;
+  panner.coneInnerAngle = 360;
+  panner.coneOuterAngle = 360;
+  panner.coneOuterGain = 1;
+  setAudioParamValue(panner.positionX, cartesian.x, context.currentTime);
+  setAudioParamValue(panner.positionY, cartesian.y, context.currentTime);
+  setAudioParamValue(panner.positionZ, cartesian.z, context.currentTime);
+  setAudioParamValue(panner.orientationX, -cartesian.x, context.currentTime);
+  setAudioParamValue(panner.orientationY, -cartesian.y, context.currentTime);
+  setAudioParamValue(panner.orientationZ, -cartesian.z, context.currentTime);
+  if (typeof panner.setPosition === "function") {
+    panner.setPosition(cartesian.x, cartesian.y, cartesian.z);
+  }
+  if (typeof panner.setOrientation === "function") {
+    panner.setOrientation(-cartesian.x, -cartesian.y, -cartesian.z);
+  }
+}
+
+function sphericalToListenerCoordinates(position = {}) {
+  const azimuth = clamp(position.azimuth || 0, -178, 178) * Math.PI / 180;
+  const elevation = clamp(position.elevation || 0, -88, 88) * Math.PI / 180;
+  const distance = Math.max(0.1, Number(position.distance) || 1);
+  const horizontal = Math.cos(elevation) * distance;
+  return {
+    x: Math.sin(azimuth) * horizontal,
+    y: Math.sin(elevation) * distance,
+    z: -Math.cos(azimuth) * horizontal
+  };
+}
+
+function hasMeasuredBrirLibrary() {
+  return false;
+}
+
+function getSurroundTapGainScale(direction, options = {}, layer = "field") {
+  const azimuth = Math.abs(normalizeDegrees(direction.azimuth || 0));
+  const elevation = Math.abs(Number(direction.elevation) || 0);
+  const side = clamp(1 - Math.abs(azimuth - 105) / 72, 0, 1);
+  const rear = clamp((azimuth - SPATIAL_FRONT_HEMISPHERE_AZIMUTH_LIMIT) / 70, 0, 1);
+  const height = clamp((elevation - 38) / 42, 0, 1);
+  const measuredBase = options.measuredBrir ? 0.98 : 1.04;
+  const spaceLift = 1 + (SPATIAL_SPACE_MULTIPLIER - 1);
+  const sideWidthLift = SPATIAL_WIDTH_MULTIPLIER - 1;
+  const surroundLift = 1
+    + side * (0.5 + (spaceLift - 1) * 0.23 + sideWidthLift * 0.5) * SPATIAL_SIDE_ENERGY_SCALE
+    + rear * (0.12 + (spaceLift - 1) * 0.04 + sideWidthLift * 0.025) * SPATIAL_SIDE_ENERGY_SCALE
+    + height * (0.23 + (spaceLift - 1) * 0.13) * (0.92 + SPATIAL_SIDE_ENERGY_SCALE * 0.08);
+  return measuredBase * surroundLift;
+}
+
+function shouldUseHrtfTap(direction, layer) {
+  const id = direction?.id;
+  if (!id) return false;
+  if (layer === "field") return SPATIAL_FIELD_HRTF_TAPS.has(id);
+  return true;
+}
+
+function createPannedDelayTap(context, input, output, direction, options = {}) {
+  const delay = context.createDelay(options.maxDelay || 0.18);
+  const gain = context.createGain();
+  const panner = createDirectionalPanner(context, direction, options);
+  delay.delayTime.value = direction.delay * (options.delayScale || 1);
+  gain.gain.value = direction.gain * (options.gainScale || 1);
+  input.connect(delay).connect(gain).connect(panner).connect(output);
+  return {
+    delay,
+    gain,
+    panner,
+    nodes: [delay, gain, panner]
+  };
+}
+
+function createDirectionalPanner(context, direction, options = {}) {
+  if (typeof context.createStereoPanner === "function") {
+    const panner = context.createStereoPanner();
+    panner.pan.value = getDirectionPan(direction, options.panScale || 1);
+    return panner;
+  }
+  const fallback = context.createGain();
+  fallback.gain.value = 1;
+  return fallback;
+}
+
+function getDirectionPan(direction, panScale = 1) {
+  const azimuth = (direction.azimuth || 0) * Math.PI / 180;
+  const side = Math.sin(azimuth);
+  const widthLift = (1 + (SPATIAL_SPACE_MULTIPLIER - 1) * 0.14) * SPATIAL_WIDTH_MULTIPLIER;
+  return clamp(side * 1.02 * widthLift * panScale * SPATIAL_NATURAL_PAN_SCALE, -1, 1);
+}
+
+function getCenterStageTapGainScale(direction, options = {}) {
+  const side = Math.abs(Math.sin((direction.azimuth || 0) * Math.PI / 180));
+  const center = Math.abs(direction.azimuth || 0) < 8 ? 1 : 0;
+  const measuredBase = options.measuredBrir ? 0.84 : 0.9;
+  return measuredBase * (center ? 0.82 : (0.94 + side * 0.24));
+}
+
+function getFarFieldDelayScale(options = {}, layer = "field") {
+  const spaceLift = 1 + (SPATIAL_SPACE_MULTIPLIER - 1);
+  const naturalScale = SPATIAL_NATURAL_DELAY_SCALE;
+  if (layer === "center") return (options.measuredBrir ? 0.39 : 0.35) * (1 + (spaceLift - 1) * 0.008) * naturalScale;
+  return (options.measuredBrir ? 0.41 : 0.37) * (1 + (spaceLift - 1) * 0.01) * naturalScale;
+}
+
+function createEmptySpatialLayer() {
+  return { send: null, taps: [], sources: [], nodes: [] };
+}
+
+function createSyntheticHrtfImpulse(context, position, options = {}) {
+  const cacheKey = getHrtfImpulseCacheKey(context, position, options);
+  const cached = state.hrtfImpulseCache.get(cacheKey);
+  if (cached) return cached;
+
+  const sampleRate = context.sampleRate;
+  const role = options.role || "direct";
+  const renderRole = role === "objectRoom" || role === "centerStage" || role === "horizon"
+    ? "reflection"
+    : (role === "object" ? "direct" : role);
+  const lengthSeconds = renderRole === "body" ? 0.018 : (renderRole === "orbit" ? 0.034 : (renderRole === "reflection" ? 0.024 : 0.0145));
+  const length = Math.max(96, Math.round(sampleRate * lengthSeconds));
+  const buffer = context.createBuffer(2, length, sampleRate);
+  const left = buffer.getChannelData(0);
+  const right = buffer.getChannelData(1);
+  const cue = getBinauralCue(position);
+  const baseDelay = renderRole === "body"
+    ? 0.0011 + cue.rear * 0.00062 + cue.low * 0.00036
+    : (renderRole === "orbit"
+      ? 0.0024 + cue.rear * 0.0011
+      : (renderRole === "reflection" ? 0.0018 + cue.rear * 0.0007 : 0.00018 + cue.rear * 0.00024));
+  const leftStart = Math.round((baseDelay + cue.leftDelay) * sampleRate);
+  const rightStart = Math.round((baseDelay + cue.rightDelay) * sampleRate);
+  const rawDistanceGain = 1 / Math.sqrt(Math.max(0.72, position.distance || 1));
+  const distanceGain = renderRole === "direct" ? rawDistanceGain : Math.max(rawDistanceGain, 0.48);
+  const roleGain = renderRole === "body" ? 0.44 : (renderRole === "orbit" ? 0.32 : (renderRole === "reflection" ? 0.38 : 0.82));
+  const seed = options.seed || 1;
+
+  addFirTap(left, leftStart, cue.leftGain * distanceGain * roleGain);
+  addFirTap(right, rightStart, cue.rightGain * distanceGain * roleGain);
+
+  const pinnaBase = Math.round((
+    0.00155 +
+    Math.abs(cue.side) * 0.00125 +
+    cue.height * 0.00115 +
+    cue.rear * 0.0018
+  ) * sampleRate);
+  const rearShade = cue.rear > 0.36 ? -1 : 1;
+  const tapCount = renderRole === "orbit" ? 7 : (renderRole === "body" ? 4 : 5);
+  for (let tap = 1; tap <= tapCount; tap += 1) {
+    const offset = pinnaBase + tap * Math.round((0.00058 + tap * 0.00018 + cue.rear * 0.00012) * sampleRate);
+    const sign = tap % 2 ? 1 : -1;
+    const spread = 1 + Math.abs(cue.side) * 0.2 + cue.height * 0.2 + cue.rear * 0.26;
+    const amp = roleGain * distanceGain * (0.12 / (tap + 0.45)) * sign * rearShade;
+    addFirTap(left, leftStart + offset, amp * (cue.leftGain * 0.68 + spread * 0.12));
+    addFirTap(right, rightStart + offset + Math.round(cue.side * sampleRate * 0.00022), amp * (cue.rightGain * 0.68 - spread * 0.09));
+  }
+
+  const shoulderDelay = Math.round((0.0048 + cue.rear * 0.0038 + cue.height * 0.0014) * sampleRate);
+  const shoulderAmp = roleGain * distanceGain * (
+    renderRole === "body"
+      ? 0.075 + cue.rear * 0.025 + cue.low * 0.024
+      : 0.035 + cue.rear * 0.028 + cue.height * 0.016
+  );
+  addFirTap(left, rightStart + shoulderDelay, shoulderAmp * cue.crossLeft);
+  addFirTap(right, leftStart + shoulderDelay + 1, shoulderAmp * cue.crossRight);
+
+  if (renderRole === "body") {
+    const wrapDelay = Math.round((0.0085 + cue.rear * 0.004 + Math.abs(cue.side) * 0.0018) * sampleRate);
+    const wrapAmp = roleGain * distanceGain * 0.055;
+    addFirTap(left, leftStart + wrapDelay, wrapAmp * (0.72 + cue.rear * 0.36));
+    addFirTap(right, rightStart + wrapDelay + 1, wrapAmp * (0.72 + cue.rear * 0.36));
+  }
+
+  const airTap = Math.round((0.0068 + Math.abs(cue.side) * 0.0018 + cue.height * 0.0012 + cue.rear * 0.0022) * sampleRate);
+  addFirTap(left, leftStart + airTap, deterministicSigned(seed, 0) * 0.018 * roleGain * (1 + cue.height * 0.5));
+  addFirTap(right, rightStart + airTap + 2, deterministicSigned(seed, 1) * 0.018 * roleGain * (1 + cue.height * 0.5));
+  normalizeImpulsePair(left, right, renderRole === "body" ? 0.46 : (renderRole === "orbit" ? 0.42 : (renderRole === "reflection" ? 0.56 : 0.82)));
+  cacheAudioBuffer(state.hrtfImpulseCache, cacheKey, buffer, 140);
+  return buffer;
+}
+
+function getHrtfImpulseCacheKey(context, position, options = {}) {
+  const role = options.role || "direct";
+  const seed = options.seed || 1;
+  const radius = Math.round(state.spatialSettings.radius * 100);
+  const azimuth = Math.round((position.azimuth || 0) * 2) / 2;
+  const elevation = Math.round((position.elevation || 0) * 2) / 2;
+  const distance = Math.round((position.distance || 1) * 20) / 20;
+  return `${context.sampleRate}:${role}:${seed}:${radius}:${azimuth}:${elevation}:${distance}`;
+}
+
+function getBinauralCue(position) {
+  const azimuthDegrees = clamp(position.azimuth || 0, -SPATIAL_MAX_RENDER_AZIMUTH, SPATIAL_MAX_RENDER_AZIMUTH);
+  const azimuth = azimuthDegrees * Math.PI / 180;
+  const elevation = clamp(position.elevation || 0, -70, 75) * Math.PI / 180;
+  const side = Math.sin(azimuth);
+  const frontBack = Math.cos(azimuth);
+  const rear = clamp((Math.abs(azimuthDegrees) - SPATIAL_FRONT_HEMISPHERE_AZIMUTH_LIMIT) / 56, 0, 1);
+  const front = Math.max(0, frontBack);
+  const height = Math.max(0, Math.sin(elevation));
+  const low = Math.max(0, -Math.sin(elevation));
+  const radius = state.spatialSettings.radius;
+  const spaceCue = Math.min(
+    1.36,
+    (1 + (SPATIAL_SPACE_MULTIPLIER - 1) * 0.08) * SPATIAL_WIDTH_MULTIPLIER
+  );
+  const maxItd = 0.00068 * (0.94 + radius * 0.12) * spaceCue;
+  const itd = side * maxItd;
+  const shadow = Math.min(0.52, Math.abs(side) * (0.24 + radius * 0.18) + rear * 0.05);
+  const heightLift = height * 0.08;
+  const rearDull = rear * 0.025;
+  const leftGain = side > 0
+    ? 1 - shadow - rearDull
+    : 1 + shadow * 0.26 + heightLift;
+  const rightGain = side < 0
+    ? 1 - shadow - rearDull
+    : 1 + shadow * 0.26 + heightLift;
+  const norm = Math.max(leftGain, rightGain, 1);
+  return {
+    side,
+    front,
+    rear,
+    height,
+    low,
+    leftDelay: Math.max(0, itd) + rear * 0.00018 + low * 0.00004 + front * height * 0.00006,
+    rightDelay: Math.max(0, -itd) + rear * 0.00018 + low * 0.00004 + front * height * 0.00006,
+    leftGain: leftGain / norm,
+    rightGain: rightGain / norm,
+    crossLeft: clamp(0.27 + front * 0.12 + rear * 0.46 + height * 0.16, 0.2, 0.86),
+    crossRight: clamp(0.27 + front * 0.12 + rear * 0.46 + height * 0.16, 0.2, 0.86)
+  };
+}
+
+function cacheAudioBuffer(cache, key, buffer, limit) {
+  if (!cache || !key || !buffer) return;
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, buffer);
+  while (cache.size > limit) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey === undefined) break;
+    cache.delete(firstKey);
+  }
+}
+
+function addFirTap(channel, index, value) {
+  if (index < 0 || index >= channel.length || !Number.isFinite(value)) return;
+  channel[index] += value;
+}
+
+function deterministicSigned(index, seed = 0) {
+  const value = Math.sin((index + 1) * 12.9898 + seed * 78.233) * 43758.5453;
+  return (value - Math.floor(value)) * 2 - 1;
+}
+
+function normalizeDegrees(value) {
+  const normalized = ((Number(value) || 0) + 180) % 360 - 180;
+  return normalized === -180 && value > 0 ? 180 : normalized;
+}
+
+function normalizeImpulsePair(left, right, targetPeak) {
+  let peak = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    peak = Math.max(peak, Math.abs(left[index]), Math.abs(right[index]));
+  }
+  if (peak <= 0 || peak <= targetPeak) return;
+  const scale = targetPeak / peak;
+  for (let index = 0; index < left.length; index += 1) {
+    left[index] *= scale;
+    right[index] *= scale;
+  }
+}
+
+function getSpatialWetGain(settings = state.spatialSettings) {
+  return clamp(settings.wet, 0, 0.84);
+}
+
+function getSpatialCenterStageGain(settings = state.spatialSettings) {
+  return clamp(0.075 + settings.radius * 0.055 + settings.reflections * 0.035, 0.1, 0.2);
+}
+
+function getSpatialReflectionGain(settings = state.spatialSettings) {
+  return clamp((0.08 + settings.reflections * 0.28) * 1.02, 0.06, 0.3);
+}
+
+function getSpatialLateralGain(settings = state.spatialSettings, analysis = state.analysis) {
+  const stereoWidth = clamp(Number(analysis?.stereoImage?.width) || 0.36, 0, 1);
+  const narrowLift = (1 - stereoWidth) * 0.12;
+  return clamp((0.24 + settings.radius * 0.11 + settings.wet * 0.07 + narrowLift) * 1.36, 0.36, 0.72);
 }
 
 function createLiveInstrumentMeter(context, input) {
   const analyser = context.createAnalyser();
-  analyser.fftSize = 4096;
+  analyser.fftSize = LIVE_ANALYSER_FFT_SIZE;
   analyser.minDecibels = -96;
   analyser.maxDecibels = -12;
   analyser.smoothingTimeConstant = 0.28;
@@ -1249,293 +2008,172 @@ function createLiveInstrumentMeter(context, input) {
   };
 }
 
-function createInstrumentMeters(context, input, analysis) {
-  const silentTap = context.createGain();
-  silentTap.gain.value = 0;
-  silentTap.connect(context.destination);
-  const byId = {};
-  const nodes = [silentTap];
-
-  analysis.instruments.forEach((instrument) => {
-    const filter = createInstrumentFilter(context, instrument);
-    const analyser = context.createAnalyser();
-    analyser.fftSize = 1024;
-    analyser.minDecibels = -96;
-    analyser.maxDecibels = -14;
-    analyser.smoothingTimeConstant = 0.18;
-    input.connect(filter);
-    filter.connect(analyser);
-    analyser.connect(silentTap);
-    byId[instrument.id] = {
-      instrument,
-      filter,
-      analyser,
-      frequencyData: new Float32Array(analyser.frequencyBinCount),
-      timeData: new Float32Array(analyser.fftSize)
-    };
-    nodes.push(filter, analyser);
-  });
-
-  return { byId, nodes };
-}
-
-function createInstrumentFilter(context, instrument) {
-  const filter = context.createBiquadFilter();
-  filter.type = getFilterType(instrument);
-  filter.frequency.value = instrument.filter.freq;
-  filter.Q.value = instrument.filter.q;
-  return filter;
-}
-
-function createAutoRemasterChain(context, input, analysis, mode) {
-  const remaster = analysis && analysis.remaster;
-  const output = context.createGain();
-  const dry = context.createGain();
-  const wet = context.createGain();
-  input.connect(dry).connect(output);
-
-  const inputGain = context.createGain();
-  inputGain.gain.value = 1;
-
-  const lowShelf = context.createBiquadFilter();
-  lowShelf.type = "lowshelf";
-  lowShelf.frequency.value = 115;
-
-  const lowMid = context.createBiquadFilter();
-  lowMid.type = "peaking";
-  lowMid.frequency.value = 360;
-  lowMid.Q.value = 0.8;
-
-  const presence = context.createBiquadFilter();
-  presence.type = "peaking";
-  presence.frequency.value = 2800;
-  presence.Q.value = 0.82;
-
-  const deharsh = context.createBiquadFilter();
-  deharsh.type = "peaking";
-  deharsh.frequency.value = 4600;
-  deharsh.Q.value = 1.15;
-
-  const air = context.createBiquadFilter();
-  air.type = "highshelf";
-  air.frequency.value = 8800;
-
-  const glue = context.createDynamicsCompressor();
-  glue.knee.value = 10;
-  glue.attack.value = 0.008;
-  glue.release.value = 0.16;
-
-  input
-    .connect(inputGain)
-    .connect(lowShelf)
-    .connect(lowMid)
-    .connect(presence)
-    .connect(deharsh)
-    .connect(air)
-    .connect(glue)
-    .connect(wet)
-    .connect(output);
-
-  const controls = {
-    remaster,
-    mode,
-    dry,
-    wet,
-    output,
-    inputGain,
-    lowShelf,
-    lowMid,
-    presence,
-    deharsh,
-    air,
-    glue
-  };
-  if (remaster) {
-    updateAutoRemasterControls(controls, context.currentTime);
-  } else {
-    dry.gain.value = 1;
-    wet.gain.value = 0;
-    output.gain.value = 1;
-  }
-
-  return {
-    output,
-    controls,
-    nodes: [dry, wet, inputGain, lowShelf, lowMid, presence, deharsh, air, glue, output]
-  };
-}
-
-function updateAutoRemasterControls(controls, time = 0) {
-  if (!controls || !controls.remaster) return;
-  const remaster = controls.remaster;
-  const enabled = state.settings.remaster && controls.mode !== "original";
-  const amount = enabled ? state.settings.remasterAmount : 0;
-  const tone = state.settings.remasterTone;
-  const clarity = state.settings.remasterClarity;
-  const headroom = state.settings.remasterHeadroom;
-  const toneBright = tone > 0 ? tone : 0;
-  const lowShelfDb = Math.min(0, remaster.lowShelfDb) - amount * 0.65;
-  const lowMidDb = Math.min(0, remaster.lowMidDb) - amount * 0.35;
-
-  controls.dry.gain.setTargetAtTime(1 - amount * 0.82, time, 0.025);
-  controls.wet.gain.setTargetAtTime(amount, time, 0.025);
-  controls.inputGain.gain.setTargetAtTime(dbToGain(remaster.inputGainDb * amount), time, 0.025);
-  controls.lowShelf.gain.setTargetAtTime(lowShelfDb * amount, time, 0.025);
-  controls.lowMid.gain.setTargetAtTime(lowMidDb * amount, time, 0.025);
-  controls.presence.gain.setTargetAtTime((remaster.presenceDb + toneBright * 1.8 + clarity * 0.7) * amount, time, 0.025);
-  controls.deharsh.gain.setTargetAtTime((remaster.deharshDb - clarity * 0.65) * amount, time, 0.025);
-  controls.air.gain.setTargetAtTime((remaster.airDb + toneBright * 1.4 + clarity * 0.5) * amount, time, 0.025);
-  controls.glue.threshold.setTargetAtTime(remaster.compressor.thresholdDb - amount * 1.5, time, 0.025);
-  controls.glue.ratio.setTargetAtTime(1 + (remaster.compressor.ratio - 1) * amount * (0.72 + clarity * 0.45), time, 0.025);
-  controls.glue.attack.setTargetAtTime(remaster.compressor.attack, time, 0.025);
-  controls.glue.release.setTargetAtTime(remaster.compressor.release + (1 - clarity) * 0.08, time, 0.025);
-
-  const spatialTrim = 0;
-  const headroomDb = -0.15 - headroom * 1.15;
-  controls.output.gain.setTargetAtTime(dbToGain((remaster.outputGainDb + spatialTrim + headroomDb) * amount), time, 0.025);
-}
-
-function getFilterType(instrument) {
-  if (instrument.id === "basses" || instrument.id === "timpani") return "lowpass";
-  if (instrument.id === "percussion") return "highpass";
-  return "bandpass";
-}
-
-function getSendLevel(instrument) {
-  const familyBoost = instrument.family === "brass" || instrument.family === "woodwinds" ? 1.12 : 1;
-  return clamp(0.28 * familyBoost, 0.08, 0.58);
-}
-
-function setPannerPosition(panner, position, time) {
-  const width = state.settings.width;
-  const depth = state.settings.depth;
-  const height = position.y * 0.58;
-  const x = position.x * width;
-  const y = height;
-  const z = position.z * depth;
-  panner.positionX.setValueAtTime(x, time);
-  panner.positionY.setValueAtTime(y, time);
-  panner.positionZ.setValueAtTime(z, time);
-}
-
-function createImpulseResponse(context, amount) {
-  const seconds = 2.35;
-  const length = Math.max(1, Math.floor(context.sampleRate * seconds));
-  const impulse = context.createBuffer(2, length, context.sampleRate);
-  for (let channel = 0; channel < 2; channel += 1) {
-    const data = impulse.getChannelData(channel);
-    for (let i = 0; i < length; i += 1) {
-      const t = i / length;
-      const early = Math.exp(-t * 8.8);
-      const tail = Math.pow(1 - t, 1.82);
-      const decay = early * 0.44 + tail * 0.56;
-      const shimmer = 0.78 + 0.22 * Math.sin(t * Math.PI * 20);
-      const stereoBias = channel === 0 ? Math.sin(i * 0.0013) : Math.cos(i * 0.0017);
-      data[i] = (Math.random() * 2 - 1 + stereoBias * 0.18) * decay * shimmer * amount * 0.44;
-    }
-  }
-  return impulse;
-}
-
-function createConcertHallImpulse(context) {
-  const seconds = 3.45;
-  const length = Math.max(1, Math.floor(context.sampleRate * seconds));
-  const impulse = context.createBuffer(2, length, context.sampleRate);
-  for (let channel = 0; channel < 2; channel += 1) {
-    const data = impulse.getChannelData(channel);
-    for (let i = 0; i < length; i += 1) {
-      const time = i / context.sampleRate;
-      const position = i / length;
-      const build = Math.min(1, time * 8.5);
-      const early = Math.exp(-time * 4.6) * 0.2;
-      const tail = Math.pow(1 - position, 2.05) * Math.exp(-time * 0.16) * 0.28;
-      const density = 0.36 + build * 0.64;
-      const shimmer = 0.82 + 0.18 * Math.sin(position * Math.PI * 28 + channel * 0.8);
-      const stereoBias = channel === 0 ? Math.sin(i * 0.0011) : Math.cos(i * 0.0016);
-      const noise = Math.random() * 2 - 1;
-      data[i] = (noise + stereoBias * 0.2) * (early + tail) * density * shimmer;
-    }
-  }
-  return impulse;
-}
-
 function disconnectGraph(graph) {
   if (!graph.nodes) return;
   graph.nodes.forEach((node) => {
+    if (!node) return;
     try {
       node.disconnect();
     } catch (disconnectError) {
       // Some nodes may already be disconnected.
     }
   });
+  graph.nodes = [];
 }
 
 function tick() {
   if (!state.playing) return;
+  const frameStart = performance.now();
+  const frameInterval = (document.hidden ? HIDDEN_VISUAL_FRAME_INTERVAL : VISUAL_FRAME_INTERVAL) * 1000;
+  if (state.lastVisualFrameAt && frameStart - state.lastVisualFrameAt < frameInterval) {
+    state.animationId = requestAnimationFrame(tick);
+    return;
+  }
+  state.lastVisualFrameAt = frameStart;
+  trackFrameTiming(frameStart);
+  const quality = getRuntimeQualityProfile();
   const time = getPlaybackTime();
   if (time >= state.audioBuffer.duration) {
     stopPlayback();
     return;
   }
-  const liveScores = readLiveInstrumentScores(time);
-  updateAutoRemasterAutomation(time);
-  updateGraphGains(time, liveScores);
-  updateRealtimeDisplay(time, liveScores);
-  updateSeek(time);
-  drawWaveform(time);
+  maybeUpdateSpectrumDisplay(time, { zero: !state.playing });
+  if (
+    state.lastMeterFrameTime < 0 ||
+    time < state.lastMeterFrameTime ||
+    time - state.lastMeterFrameTime >= quality.meterInterval
+  ) {
+    const meterStart = performance.now();
+    refreshRealtimeMetersForMode(time);
+    trackPerfSample("meterMs", performance.now() - meterStart);
+    state.lastMeterFrameTime = time;
+  }
+  maybeUpdateSeek(time);
+  if (!document.hidden && (time < state.lastWaveformDrawTime || time - state.lastWaveformDrawTime > quality.waveformInterval)) {
+    const waveformStart = performance.now();
+    drawWaveform(time);
+    trackPerfSample("waveformMs", performance.now() - waveformStart);
+    state.lastWaveformDrawTime = time;
+  }
+  trackPerfSample("frameMs", performance.now() - frameStart);
+  updatePerfPanel(frameStart);
   state.animationId = requestAnimationFrame(tick);
 }
 
-function updateGraphGains(time, liveScores = null) {
-  if (!state.graph || !state.analysis) return;
-  if (state.graph.stemGains) return;
-  if (!state.graph.gains) return;
-  const now = state.audioContext.currentTime;
-  const modeGain = 0.48;
-  state.analysis.instruments.forEach((instrument) => {
-    const gain = state.graph.gains[instrument.id];
-    if (!gain) return;
-    const timelineLevel = getInstrumentAudioLevel(instrument, time);
-    const liveLevel = liveScores ? (liveScores[instrument.id] || 0) : 0;
-    const level = liveScores
-      ? clamp(timelineLevel * 0.58 + liveLevel * 0.42, 0, 1)
-      : timelineLevel;
-    const target = Math.pow(level, 1.12) * modeGain * getFamilyGain(instrument.family);
-    gain.gain.setTargetAtTime(target, now, 0.018);
-  });
+function refreshRealtimeMetersForMode(time, options = {}) {
+  if (!state.analysis) return;
+  if (state.mode === "original") {
+    setRealtimeMetersToZero(time);
+    return;
+  }
+  if (!state.playing) {
+    updateRealtimeDisplay(time);
+    updateSoundFieldDisplay(time, readSoundFieldScores(time));
+    return;
+  }
+  const liveScores = readLiveInstrumentScores(time);
+  if (shouldUpdateStemDisplay(time, options)) {
+    updateRealtimeDisplay(time, liveScores, { updateField: false });
+    state.lastStemDisplayFrameTime = time;
+  }
+  if (shouldUpdateFieldDisplay(time, options)) {
+    updateSoundFieldDisplay(time, readSoundFieldScores(time, liveScores));
+    state.lastFieldDisplayFrameTime = time;
+  }
 }
 
-function getFamilyGain(family) {
-  if (family === "percussion") return 0.82;
-  if (family === "brass") return 0.78;
-  if (family === "keyboard" || family === "plucked") return 0.72;
-  return 0.86;
+function shouldUpdateStemDisplay(time, options = {}) {
+  if (document.hidden && !options.forceDisplay) return false;
+  const quality = getRuntimeQualityProfile();
+  const interval = Number.isFinite(quality.stemDisplayInterval) ? quality.stemDisplayInterval : quality.meterInterval;
+  return options.forceDisplay ||
+    state.lastStemDisplayFrameTime < 0 ||
+    time < state.lastStemDisplayFrameTime ||
+    time - state.lastStemDisplayFrameTime >= interval;
+}
+
+function shouldUpdateFieldDisplay(time, options = {}) {
+  if (document.hidden && !options.forceDisplay) return false;
+  const quality = getRuntimeQualityProfile();
+  const interval = Number.isFinite(quality.fieldDisplayInterval) ? quality.fieldDisplayInterval : quality.meterInterval;
+  return options.forceDisplay ||
+    state.lastFieldDisplayFrameTime < 0 ||
+    time < state.lastFieldDisplayFrameTime ||
+    time - state.lastFieldDisplayFrameTime >= interval;
+}
+
+function readMainAnalyserFrame(time = 0, options = {}) {
+  const graph = state.graph;
+  if (!graph || !graph.analyser || !graph.frequencyData || !graph.timeData || !state.audioContext) {
+    return null;
+  }
+  const needsFrequency = options.frequency !== false;
+  const needsTime = options.time !== false;
+  const frameTime = Number.isFinite(time) ? time : getPlaybackTime();
+  const maxAge = Number.isFinite(options.maxAge) ? options.maxAge : 0.024;
+  const previous = state.lastLiveAnalysisFrame;
+  const canReuse =
+    !options.force &&
+    previous &&
+    previous.graph === graph &&
+    Math.abs(frameTime - previous.time) <= maxAge;
+  if (
+    canReuse &&
+    (!needsFrequency || previous.hasFrequency) &&
+    (!needsTime || previous.hasTime)
+  ) {
+    return previous;
+  }
+  const frame = canReuse ? previous : {
+    graph,
+    time: frameTime,
+    frequencyData: graph.frequencyData,
+    timeData: graph.timeData,
+    sampleRate: state.audioContext.sampleRate,
+    fftSize: graph.analyser.fftSize,
+    outputLevel: state.liveOutputLevel,
+    quality: null,
+    hasFrequency: false,
+    hasTime: false
+  };
+  frame.time = frameTime;
+  if (needsFrequency && !frame.hasFrequency) {
+    graph.analyser.getFloatFrequencyData(graph.frequencyData);
+    frame.hasFrequency = true;
+  }
+  if (needsTime && !frame.hasTime) {
+    graph.analyser.getFloatTimeDomainData(graph.timeData);
+    frame.outputLevel = getMeterSignalLevel(graph.timeData);
+    frame.hasTime = true;
+  }
+  state.lastLiveAnalysisFrame = frame;
+  state.liveOutputLevel = frame.outputLevel;
+  return frame;
 }
 
 function readLiveInstrumentScores(time = 0) {
   const graph = state.graph;
   if (!graph || !state.audioContext) return null;
-  if (graph.spatialMeters && graph.spatialMeters.byId) {
-    const stemScores = readSpatialStemMeterScores(graph.spatialMeters, graph.previousLiveScores || {});
+  if (graph.stemAnalysisMeters && graph.stemAnalysisMeters.byId && Object.keys(graph.stemAnalysisMeters.byId).length) {
+    const stemScores = readStemAnalysisMeterScores(graph.stemAnalysisMeters, graph.previousLiveScores || {});
+    readMainAnalyserFrame(time, { frequency: false });
     graph.previousLiveScores = stemScores;
     state.liveScores = stemScores;
     return stemScores;
   }
-  if (graph.instrumentMeters && graph.instrumentMeters.byId) {
-    const instrumentScores = readInstrumentMeterScores(graph.instrumentMeters, time, graph.previousLiveScores || {});
-    graph.previousLiveScores = instrumentScores;
-    state.liveScores = instrumentScores;
-    return instrumentScores;
-  }
   if (!graph.analyser) return null;
-  graph.analyser.getFloatFrequencyData(graph.frequencyData);
-  graph.analyser.getFloatTimeDomainData(graph.timeData);
+  const frame = readMainAnalyserFrame(time);
+  if (!frame) return null;
+  if (!graph.livePowerData || graph.livePowerData.length !== frame.frequencyData.length) {
+    graph.livePowerData = new Float32Array(frame.frequencyData.length);
+  }
   const scores = classifyLiveInstruments(
-    graph.frequencyData,
-    graph.timeData,
-    state.audioContext.sampleRate,
-    graph.analyser.fftSize,
-    graph.previousLiveScores || {}
+    frame.frequencyData,
+    frame.timeData,
+    frame.sampleRate,
+    frame.fftSize,
+    graph.previousLiveScores || {},
+    graph.livePowerData
   );
   const guardedScores = applyLiveInstrumentRoster(scores);
   graph.previousLiveScores = guardedScores;
@@ -1543,50 +2181,18 @@ function readLiveInstrumentScores(time = 0) {
   return guardedScores;
 }
 
-function readSpatialStemMeterScores(spatialMeters, previousScores) {
+function readStemAnalysisMeterScores(stemMeters, previousScores) {
   const scores = {};
-  Object.entries(spatialMeters.byId).forEach(([id, meter]) => {
+  Object.entries(stemMeters.byId).forEach(([id, meter]) => {
     meter.analyser.getFloatTimeDomainData(meter.timeData);
-    const raw = getMeterSignalLevel(meter.timeData);
+    const raw = getStemMeterSignalLevel(meter.timeData);
+    const shaped = shapeStemMeterLevel(raw);
     const previous = previousScores[id] || 0;
-    scores[id] = raw >= previous
-      ? previous * 0.1 + raw * 0.9
-      : previous * 0.48 + raw * 0.52;
+    scores[id] = shaped >= previous
+      ? previous * 0.12 + shaped * 0.88
+      : previous * 0.54 + shaped * 0.46;
   });
   return scores;
-}
-
-function readInstrumentMeterScores(instrumentMeters, time, previousScores) {
-  const rawScores = {};
-  Object.entries(instrumentMeters.byId).forEach(([id, meter]) => {
-    meter.analyser.getFloatFrequencyData(meter.frequencyData);
-    meter.analyser.getFloatTimeDomainData(meter.timeData);
-    const instrument = meter.instrument;
-    const meterLevel = getMeterSignalLevel(meter.timeData);
-    const spectralBody = getMeterSpectralBody(meter.frequencyData, state.audioContext.sampleRate, instrument);
-    const timelineCue = getInstrumentLevelFromCurve(instrument.displayCurve || instrument.curve, time);
-    const activeBoost = instrument.active ? 1 : 0.08;
-    const cueGate = instrument.active ? (0.18 + timelineCue * 0.92) : 0.08;
-    rawScores[id] = Math.pow(meterLevel, 0.78) * (0.42 + spectralBody * 0.75) * cueGate * activeBoost;
-  });
-
-  const activeEntries = Object.entries(rawScores).filter(([id]) => {
-    const meter = instrumentMeters.byId[id];
-    return meter && meter.instrument.active;
-  });
-  const maxScore = Math.max(...activeEntries.map(([, score]) => score), 1e-8);
-  const normalized = {};
-  Object.entries(rawScores).forEach(([id, score]) => {
-    const meter = instrumentMeters.byId[id];
-    const previous = previousScores[id] || 0;
-    const relative = score / maxScore;
-    const threshold = meter.instrument.active ? 0.055 : 0.22;
-    const gated = relative < threshold ? 0 : Math.pow(relative, 0.68);
-    normalized[id] = gated >= previous
-      ? previous * 0.16 + gated * 0.84
-      : previous * 0.6 + gated * 0.4;
-  });
-  return normalized;
 }
 
 function getMeterSignalLevel(timeData) {
@@ -1603,28 +2209,20 @@ function getMeterSignalLevel(timeData) {
   return clamp((rmsDb + 58) / 34 + Math.max(0, peakDb + 36) / 90, 0, 1);
 }
 
-function getMeterSpectralBody(frequencyData, sampleRate, instrument) {
-  const signature = LIVE_SIGNATURES[instrument.id];
-  if (!signature) return 0.5;
-  const binHz = (sampleRate / 2) / frequencyData.length;
-  let total = 0;
-  let weighted = 0;
-  for (let index = 0; index < frequencyData.length; index += 1) {
-    const amp = 10 ** ((Number.isFinite(frequencyData[index]) ? frequencyData[index] : -120) / 20);
-    const energy = amp * amp;
-    total += energy;
+function getStemMeterSignalLevel(timeData) {
+  let rms = 0;
+  let peak = 0;
+  for (let index = 0; index < timeData.length; index += 1) {
+    const sample = timeData[index];
+    rms += sample * sample;
+    peak = Math.max(peak, Math.abs(sample));
   }
-  signature.bands.forEach(([min, max, weight]) => {
-    const start = Math.max(0, Math.floor(min / binHz));
-    const end = Math.min(frequencyData.length - 1, Math.ceil(max / binHz));
-    let band = 0;
-    for (let index = start; index <= end; index += 1) {
-      const amp = 10 ** ((Number.isFinite(frequencyData[index]) ? frequencyData[index] : -120) / 20);
-      band += amp * amp;
-    }
-    weighted += (band / Math.max(total, 1e-12)) * weight;
-  });
-  return clamp(weighted * 3.2, 0, 1);
+  rms = Math.sqrt(rms / Math.max(1, timeData.length));
+  const rmsDb = 20 * Math.log10(rms + 1e-7);
+  const peakDb = 20 * Math.log10(peak + 1e-7);
+  const rmsScore = clamp((rmsDb + 58) / 44, 0, 1);
+  const peakScore = clamp((peakDb + 30) / 54, 0, 1);
+  return clamp(rmsScore * 0.82 + peakScore * 0.18, 0, 1);
 }
 
 function applyLiveInstrumentRoster(scores) {
@@ -1636,8 +2234,8 @@ function applyLiveInstrumentRoster(scores) {
   ]));
 }
 
-function classifyLiveInstruments(frequencyData, timeData, sampleRate, fftSize, previousScores) {
-  const features = extractLiveAudioFeatures(frequencyData, timeData, sampleRate, fftSize);
+function classifyLiveInstruments(frequencyData, timeData, sampleRate, fftSize, previousScores, powerBuffer = null) {
+  const features = extractLiveAudioFeatures(frequencyData, timeData, sampleRate, fftSize, powerBuffer);
   if (features.signalLevel <= 0.025) {
     return Object.fromEntries(Object.keys(LIVE_SIGNATURES).map((id) => [id, 0]));
   }
@@ -1667,10 +2265,12 @@ function classifyLiveInstruments(frequencyData, timeData, sampleRate, fftSize, p
   return normalized;
 }
 
-function extractLiveAudioFeatures(frequencyData, timeData, sampleRate, fftSize) {
+function extractLiveAudioFeatures(frequencyData, timeData, sampleRate, fftSize, powerBuffer = null) {
   const nyquist = sampleRate / 2;
   const binHz = nyquist / frequencyData.length;
-  const power = new Float32Array(frequencyData.length);
+  const power = powerBuffer && powerBuffer.length === frequencyData.length
+    ? powerBuffer
+    : new Float32Array(frequencyData.length);
   let total = 0;
   let centroidSum = 0;
   let logSum = 0;
@@ -1791,9 +2391,11 @@ function protectLivePiano(scores, features) {
   }
 }
 
-function updateRealtimeDisplay(time, liveScores = null) {
+function updateRealtimeDisplay(time, liveScores = null, options = {}) {
   if (!state.analysis) return;
-  refs.frameTime.textContent = formatTime(time);
+  state.metersZeroed = false;
+  const updateField = options.updateField !== false;
+  setText(refs.frameTime, formatTime(time));
   getDisplayObjects(state.analysis).forEach((object) => {
     const liveLevel = liveScores ? (liveScores[object.id] || 0) : null;
     const rawLevel = getObjectDisplayLevel(object, time, liveLevel);
@@ -1802,30 +2404,487 @@ function updateRealtimeDisplay(time, liveScores = null) {
       ? previous * 0.18 + rawLevel * 0.82
       : previous * 0.58 + rawLevel * 0.42;
     state.meterLevels[object.id] = level;
-    const row = refs.instrumentList.querySelector(`[data-id="${object.id}"]`);
-    const node = refs.stageMap.querySelector(`[data-id="${object.id}"]`);
-    if (row) {
-      row.style.setProperty("--level", level.toFixed(3));
-      row.classList.toggle("is-sounding", level > 0.055);
-      row.classList.toggle("is-live-detected", liveLevel !== null && liveLevel > 0.12);
-      row.classList.toggle("is-inactive", !object.active && level <= 0.055);
-      const value = row.querySelector("em");
-      if (value) value.textContent = `${Math.round(level * 100)}%`;
+    const meterRef = state.meterRows[object.id];
+    if (meterRef) {
+      const { row, value, cache } = meterRef;
+      const visualLevel = clamp(level, 0, 1);
+      if (Math.abs(visualLevel - cache.level) > METER_STYLE_EPSILON || (visualLevel === 0 && cache.level !== 0)) {
+        cache.level = visualLevel;
+        setStyleProperty(row, "--level", visualLevel.toFixed(2));
+      }
+      const sounding = visualLevel > 0.055;
+      const live = liveLevel !== null && liveLevel > 0.12;
+      const inactive = !object.active && visualLevel <= 0.055;
+      if (cache.sounding !== sounding) {
+        cache.sounding = sounding;
+        toggleClass(row, "is-sounding", sounding);
+      }
+      if (cache.live !== live) {
+        cache.live = live;
+        toggleClass(row, "is-live-detected", live);
+      }
+      if (cache.inactive !== inactive) {
+        cache.inactive = inactive;
+        toggleClass(row, "is-inactive", inactive);
+      }
+      const percent = Math.round(visualLevel * 100);
+      if (cache.percent !== percent) {
+        cache.percent = percent;
+        setText(value, `${percent}%`);
+      }
     }
-    if (node) {
-      node.style.setProperty("--level", level.toFixed(3));
-      node.classList.toggle("is-sounding", level > 0.055);
-      node.classList.toggle("is-live-detected", liveLevel !== null && liveLevel > 0.12);
-      node.classList.toggle("is-inactive", !object.active && level <= 0.055);
+    if (updateField) {
+      const previousField = state.fieldLevels[object.id] || 0;
+      const fieldLevel = rawLevel >= previousField
+        ? previousField * 0.16 + rawLevel * 0.84
+        : previousField * 0.62 + rawLevel * 0.38;
+      state.fieldLevels[object.id] = fieldLevel;
+      updateFieldNodes(state.fieldNodeGroups[object.id] || [], object, fieldLevel, liveLevel, time);
     }
   });
 }
 
+function readSoundFieldScores(time = 0, liveScores = null) {
+  if (!state.analysis || !state.graph) return null;
+  if (state.mode === "original") {
+    return Object.fromEntries(getDisplayObjects(state.analysis).map((object) => [object.id, 0]));
+  }
+  const frame = readMainAnalyserFrame(time, { frequency: false, maxAge: 0.08 });
+  const globalLevel = frame ? frame.outputLevel : state.liveOutputLevel;
+  const scoreSource = liveScores || state.liveScores || {};
+  const objects = getDisplayObjects(state.analysis);
+  const scores = {};
+  objects.forEach((object, index) => {
+    const hasLiveStemScore = object.kind === "stem" &&
+      Object.prototype.hasOwnProperty.call(scoreSource, object.id);
+    const liveStemLevel = hasLiveStemScore
+      ? shapeStemDisplayLevel(scoreSource[object.id] || 0)
+      : null;
+    const timeline = object.kind === "stem"
+      ? (liveStemLevel === null ? getStemFieldWeight(object) : liveStemLevel)
+      : getInstrumentLevelFromCurve(object.displayCurve || object.curve, time);
+    const activity = object.active ? 1 : 0.45;
+    const drift = 0.9 + getFieldDrift(object.id, index, time) * 0.16;
+    const depthLift = clamp((Math.abs(object.position.x) * 0.08) + (Math.abs(object.position.z) * 0.035), 0, 0.22);
+    const stemGate = hasLiveStemScore
+      ? clamp((timeline - 0.022) / 0.2, 0, 1)
+      : 1;
+    scores[object.id] = clamp(globalLevel * (0.52 + timeline * 0.58 + depthLift) * activity * drift * stemGate, 0, 1);
+  });
+  return scores;
+}
+
+function updateSoundFieldDisplay(time, fieldScores = null) {
+  if (!state.analysis) return;
+  state.metersZeroed = false;
+  setText(refs.frameTime, formatTime(time));
+  getDisplayObjects(state.analysis).forEach((object) => {
+    const rawLevel = fieldScores ? (fieldScores[object.id] || 0) : 0;
+    const previous = state.fieldLevels[object.id] || 0;
+    const level = rawLevel >= previous
+      ? previous * 0.14 + rawLevel * 0.86
+      : previous * 0.64 + rawLevel * 0.36;
+    state.fieldLevels[object.id] = level;
+    updateFieldNodes(state.fieldNodeGroups[object.id] || [], object, level, level, time);
+  });
+}
+
+function maybeUpdateSpectrumDisplay(time = 0, options = {}) {
+  if (document.hidden && !options.force) return;
+  const quality = getRuntimeQualityProfile();
+  const interval = Number.isFinite(quality.spectrumInterval) ? quality.spectrumInterval : quality.meterInterval;
+  if (
+    options.force ||
+    state.lastSpectrumFrameTime < 0 ||
+    time < state.lastSpectrumFrameTime ||
+    time - state.lastSpectrumFrameTime >= interval
+  ) {
+    const spectrumStart = performance.now();
+    updateSpectrumDisplay(time, options);
+    trackPerfSample("spectrumMs", performance.now() - spectrumStart);
+    state.lastSpectrumFrameTime = time;
+  }
+}
+
+function updateSpectrumDisplay(time = 0, options = {}) {
+  if (!refs.spectrumCanvas) return;
+  const hasLiveAnalyser = state.playing &&
+    !options.zero &&
+    state.graph &&
+    state.graph.analyser &&
+    state.graph.frequencyData &&
+    state.audioContext;
+  const nextLevels = hasLiveAnalyser
+    ? readLiveSpectrumLevels()
+    : state.spectrumLevels.map((level) => level * 0.72);
+  state.spectrumLevels = nextLevels;
+  state.spectrumPeaks = updateSpectrumPeaks(nextLevels, state.spectrumPeaks, hasLiveAnalyser);
+  drawSpectrumGraph(nextLevels, { time, peaks: state.spectrumPeaks, zero: !hasLiveAnalyser || options.zero, force: options.force });
+  setText(refs.spectrumStatus, hasLiveAnalyser ? `Live 24 bands · ${getSpectrumTargetFps()} fps` : "Low-load analyser");
+}
+
+function getSpectrumTargetFps() {
+  const quality = getRuntimeQualityProfile();
+  const interval = Number.isFinite(quality.spectrumInterval) ? quality.spectrumInterval : 1 / 30;
+  return Math.round(1 / interval);
+}
+
+function updateSpectrumPeaks(levels, previousPeaks = [], active = false) {
+  return levels.map((level, index) => {
+    const previous = previousPeaks[index] || 0;
+    if (!active) return previous * 0.66;
+    return level >= previous ? level : Math.max(level, previous - 0.026);
+  });
+}
+
+function readLiveSpectrumLevels() {
+  const graph = state.graph;
+  if (!graph || !graph.analyser || !graph.frequencyData || !state.audioContext) {
+    return state.spectrumLevels;
+  }
+  const frame = readMainAnalyserFrame(getPlaybackTime(), { time: false, maxAge: 0.08 });
+  if (!frame) return state.spectrumLevels;
+  return buildSpectrumLevels(
+    frame.frequencyData,
+    frame.sampleRate,
+    state.spectrumLevels
+  );
+}
+
+function buildSpectrumLevels(frequencyData, sampleRate, previousLevels = []) {
+  if (!frequencyData || !frequencyData.length || !sampleRate) {
+    return Array.from({ length: SPECTRUM_BAR_COUNT }, () => 0);
+  }
+  const ranges = getSpectrumRanges(frequencyData.length, sampleRate);
+  const next = new Array(SPECTRUM_BAR_COUNT).fill(0);
+  const lowBandLimit = Math.max(1, Math.round(SPECTRUM_BAR_COUNT * 0.145));
+  const highBandStart = Math.round(SPECTRUM_BAR_COUNT * 0.708);
+
+  for (let band = 0; band < SPECTRUM_BAR_COUNT; band += 1) {
+    const [start, end] = ranges[band];
+    let sum = 0;
+    let peak = 0;
+    for (let index = start; index < end; index += 1) {
+      const db = Number.isFinite(frequencyData[index]) ? frequencyData[index] : -120;
+      const normalized = clamp((db + 94) / 78, 0, 1);
+      const energy = normalized * normalized;
+      sum += energy;
+      if (energy > peak) peak = energy;
+    }
+    const average = sum / Math.max(1, end - start);
+    const lowCompensation = band < lowBandLimit ? 0.86 + (band / lowBandLimit) * 0.14 : 1;
+    const highAirLift = band > highBandStart ? 1 + ((band - highBandStart) / Math.max(1, SPECTRUM_BAR_COUNT - highBandStart)) * 0.14 : 1;
+    const raw = clamp((average * 0.48 + peak * 0.52) * lowCompensation * highAirLift, 0, 1);
+    const shaped = Math.pow(raw, 0.68);
+    const previous = previousLevels[band] || 0;
+    next[band] = shaped >= previous
+      ? previous * 0.14 + shaped * 0.86
+      : previous * 0.68 + shaped * 0.32;
+  }
+
+  return next;
+}
+
+function getSpectrumRanges(binCount, sampleRate) {
+  const key = `${binCount}:${sampleRate}:${SPECTRUM_BAR_COUNT}`;
+  if (state.spectrumRanges && state.spectrumRangeKey === key) return state.spectrumRanges;
+
+  const binHz = (sampleRate / 2) / binCount;
+  const minHz = 20;
+  const maxHz = Math.min(20000, sampleRate / 2);
+  const ratio = maxHz / minHz;
+  state.spectrumRanges = Array.from({ length: SPECTRUM_BAR_COUNT }, (_, band) => {
+    const startHz = minHz * Math.pow(ratio, band / SPECTRUM_BAR_COUNT);
+    const endHz = minHz * Math.pow(ratio, (band + 1) / SPECTRUM_BAR_COUNT);
+    const start = clamp(Math.floor(startHz / binHz), 0, binCount - 1);
+    const end = clamp(Math.max(start + 1, Math.ceil(endHz / binHz)), start + 1, binCount);
+    return [start, end, startHz, endHz];
+  });
+  state.spectrumRangeKey = key;
+  return state.spectrumRanges;
+}
+
+function getSpectrumContext(canvas) {
+  if (!state.spectrumContext) {
+    state.spectrumContext = canvas.getContext("2d");
+  }
+  return state.spectrumContext;
+}
+
+function drawSpectrumGraph(levels = state.spectrumLevels, options = {}) {
+  const canvas = refs.spectrumCanvas;
+  if (!canvas) return;
+  const ctx = getSpectrumContext(canvas);
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.floor(rect.width * dpr));
+  const height = Math.max(1, Math.floor(rect.height * dpr));
+  const resized = canvas.width !== width || canvas.height !== height || state.spectrumCache.dpr !== dpr;
+  if (resized) {
+    canvas.width = width;
+    canvas.height = height;
+    state.spectrumCache.width = width;
+    state.spectrumCache.height = height;
+    state.spectrumCache.dpr = dpr;
+    state.spectrumCache.backgroundKey = "";
+    state.spectrumCache.gradientKey = "";
+  }
+
+  drawSpectrumBackground(ctx, width, height, dpr);
+
+  const paddingX = Math.max(18 * dpr, width * 0.018);
+  const top = 22 * dpr;
+  const bottom = 44 * dpr;
+  const graphHeight = Math.max(1, height - top - bottom);
+  const barGap = Math.max(3 * dpr, width * 0.004);
+  const barWidth = Math.max(2 * dpr, (width - paddingX * 2) / SPECTRUM_BAR_COUNT - barGap);
+  const barGradient = getSpectrumGradient(ctx, height);
+  ctx.fillStyle = barGradient;
+  ctx.shadowBlur = 0;
+
+  let energy = 0;
+  const peaks = Array.isArray(options.peaks) ? options.peaks : [];
+  levels.forEach((level, index) => {
+    const visual = clamp(level, 0, 1);
+    energy += visual;
+    const x = paddingX + index * (barWidth + barGap);
+    const barHeight = Math.max(2 * dpr, graphHeight * visual);
+    const y = top + graphHeight - barHeight;
+    ctx.fillRect(x, y, barWidth, barHeight);
+    const peak = clamp(peaks[index] || 0, 0, 1);
+    if (peak > 0.02) {
+      const peakY = top + graphHeight - graphHeight * peak;
+      ctx.fillStyle = cssColor("--gold", "#d7b56d");
+      ctx.fillRect(x, peakY, barWidth, Math.max(2 * dpr, 2));
+      ctx.fillStyle = barGradient;
+    }
+  });
+
+  ctx.shadowBlur = 0;
+  const average = levels.length ? energy / levels.length : 0;
+  drawSpectrumEnergyLine(ctx, levels, {
+    width,
+    height,
+    paddingX,
+    top,
+    graphHeight,
+    time: options.time || 0,
+    energy: average,
+    dpr
+  });
+}
+
+function drawSpectrumBackground(ctx, width, height, dpr) {
+  const theme = document.documentElement.dataset.theme || "light";
+  const key = `${width}:${height}:${dpr}:${theme}`;
+  if (!state.spectrumCache.backgroundCanvas || state.spectrumCache.backgroundKey !== key) {
+    const background = document.createElement("canvas");
+    background.width = width;
+    background.height = height;
+    const bg = background.getContext("2d");
+    drawSpectrumBackgroundLayer(bg, width, height, dpr);
+    state.spectrumCache.backgroundKey = key;
+    state.spectrumCache.backgroundCanvas = background;
+  }
+  ctx.drawImage(state.spectrumCache.backgroundCanvas, 0, 0);
+}
+
+function drawSpectrumBackgroundLayer(ctx, width, height, dpr) {
+  ctx.fillStyle = cssColor("--canvas-bg", "rgba(238,244,240,0.78)");
+  ctx.fillRect(0, 0, width, height);
+
+  const zones = [
+    [0, 0.22, "--green"],
+    [0.22, 0.46, "--blue"],
+    [0.46, 0.74, "--coral"],
+    [0.74, 1, "--gold"]
+  ];
+  zones.forEach(([start, end, color]) => {
+    ctx.globalAlpha = 0.085;
+    ctx.fillStyle = cssColor(color, "rgba(81,127,150,0.18)");
+    ctx.fillRect(width * start, 0, width * (end - start), height);
+  });
+  ctx.globalAlpha = 1;
+
+  ctx.strokeStyle = cssColor("--line", "rgba(32,41,51,0.14)");
+  ctx.lineWidth = Math.max(1, dpr);
+  for (let index = 1; index <= 3; index += 1) {
+    const y = (height * index) / 4;
+    ctx.globalAlpha = 0.34;
+    ctx.beginPath();
+    ctx.moveTo(18 * dpr, y);
+    ctx.lineTo(width - 18 * dpr, y);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawSpectrumEnergyLine(ctx, levels, layout) {
+  if (!levels.length) return;
+  const { width, paddingX, top, graphHeight, energy, dpr } = layout;
+  const step = (width - paddingX * 2) / Math.max(1, levels.length - 1);
+  ctx.beginPath();
+  levels.forEach((level, index) => {
+    const x = paddingX + index * step;
+    const y = top + graphHeight - graphHeight * clamp(level * 0.92, 0, 1);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = cssColor("--gold", "#d7b56d");
+  ctx.lineWidth = Math.max(1.2 * dpr, 1);
+  ctx.globalAlpha = clamp(0.18 + energy * 0.34, 0.18, 0.52);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+function getSpectrumGradient(ctx, height) {
+  const theme = document.documentElement.dataset.theme || "light";
+  const key = `${height}:${theme}`;
+  if (state.spectrumCache.gradientKey !== key) {
+    const gradient = ctx.createLinearGradient(0, height, 0, 0);
+    gradient.addColorStop(0, cssColor("--green", "#687f5b"));
+    gradient.addColorStop(0.42, cssColor("--blue", "#517f96"));
+    gradient.addColorStop(0.76, cssColor("--coral", "#c86f5a"));
+    gradient.addColorStop(1, cssColor("--gold", "#d7b56d"));
+    state.spectrumCache.gradientKey = key;
+    state.spectrumCache.gradient = gradient;
+  }
+  return state.spectrumCache.gradient;
+}
+
+function updateFieldNodes(nodes, object, level, liveLevel, time) {
+  nodes.forEach((node) => {
+    if (!node._fieldNode) {
+      node._fieldNode = {
+        level: -1,
+        sounding: null,
+        live: null,
+        inactive: null,
+        left: null,
+        top: null
+      };
+    }
+    const cached = node._fieldNode;
+    const visualLevel = clamp(level, 0, 1);
+    if (Math.abs(visualLevel - cached.level) > 0.01) {
+      cached.level = visualLevel;
+      setStyleProperty(node, "--level", visualLevel.toFixed(2));
+    }
+    const sounding = visualLevel > 0.045;
+    const live = liveLevel !== null && liveLevel > 0.12;
+    const inactive = !object.active && visualLevel <= 0.055;
+    if (cached.sounding !== sounding) {
+      cached.sounding = sounding;
+      node.classList.toggle("is-sounding", sounding);
+    }
+    if (cached.live !== live) {
+      cached.live = live;
+      node.classList.toggle("is-live-detected", live);
+    }
+    if (cached.inactive !== inactive) {
+      cached.inactive = inactive;
+      node.classList.toggle("is-inactive", inactive);
+    }
+  });
+}
+
+function getStemFieldWeight(stem) {
+  if (stem.id === "vocals") return 0.9;
+  if (stem.id === "other") return 0.82;
+  if (stem.id === "drums") return 0.72;
+  if (stem.id === "bass") return 0.52;
+  return 0.7;
+}
+
+function getFieldDrift(id, index, time) {
+  const seed = getFieldDriftSeed(id);
+  return Math.sin(time * (0.82 + index * 0.06) + seed * 0.13) * 0.5 + 0.5;
+}
+
+function getFieldDriftSeed(id) {
+  if (Number.isFinite(state.fieldDriftSeeds[id])) {
+    return state.fieldDriftSeeds[id];
+  }
+  let seed = 0;
+  for (let index = 0; index < id.length; index += 1) {
+    seed += id.charCodeAt(index);
+  }
+  state.fieldDriftSeeds[id] = seed;
+  return seed;
+}
+
+function setRealtimeMetersToZero(time = 0) {
+  if (!state.analysis) return;
+  state.liveScores = {};
+  setText(refs.frameTime, formatTime(time));
+  if (state.metersZeroed) return;
+  getDisplayObjects(state.analysis).forEach((object) => {
+    state.meterLevels[object.id] = 0;
+    const meterRef = state.meterRows[object.id];
+    const nodes = state.fieldNodeGroups[object.id] || [];
+    if (meterRef) {
+      const { row, value, cache } = meterRef;
+      setStyleProperty(row, "--level", "0");
+      toggleClass(row, "is-sounding", false);
+      toggleClass(row, "is-live-detected", false);
+      toggleClass(row, "is-inactive", !object.active);
+      setText(value, "0%");
+      if (cache) {
+        cache.level = 0;
+        cache.percent = 0;
+        cache.sounding = false;
+        cache.live = false;
+        cache.inactive = !object.active;
+      }
+    }
+    state.fieldLevels[object.id] = 0;
+    nodes.forEach((node) => {
+      setStyleProperty(node, "--level", "0");
+      if (node._fieldNode) {
+        node._fieldNode.level = 0;
+        node._fieldNode.sounding = false;
+        node._fieldNode.live = false;
+        node._fieldNode.inactive = !object.active;
+      }
+      toggleClass(node, "is-sounding", false);
+      toggleClass(node, "is-live-detected", false);
+      toggleClass(node, "is-inactive", !object.active);
+    });
+  });
+  state.metersZeroed = true;
+}
+
 function getObjectDisplayLevel(object, time, liveLevel = null) {
   if (object.kind === "stem") {
-    return liveLevel === null ? 0 : clamp(liveLevel, 0, 1);
+    return liveLevel === null ? 0 : softenStemBarLevel(liveLevel);
   }
   return getInstrumentDisplayLevel(object, time, liveLevel);
+}
+
+function shapeStemDisplayLevel(level) {
+  const gated = clamp((level - 0.018) / 0.982, 0, 1);
+  if (gated <= 0) return 0;
+  const normalized = (1 - Math.exp(-3.1 * gated)) / (1 - Math.exp(-3.1));
+  const steady = normalized * 0.9;
+  const peakLift = Math.pow(gated, 10) * 0.1;
+  return clamp(steady + peakLift, 0, 1);
+}
+
+function shapeStemMeterLevel(level) {
+  const gated = clamp(level, 0, 1);
+  if (gated <= 0) return 0;
+  return clamp(Math.pow(gated, 0.92), 0, 1);
+}
+
+function softenStemBarLevel(level) {
+  const gated = clamp(level, 0, 1);
+  if (gated <= 0) return 0;
+  const normal = STEM_BAR_NORMAL_CEILING *
+    (1 - Math.exp(-STEM_BAR_RESPONSE_CURVE * gated)) /
+    (1 - Math.exp(-STEM_BAR_RESPONSE_CURVE));
+  const peakRatio = clamp((gated - STEM_BAR_PEAK_GATE) / (1 - STEM_BAR_PEAK_GATE), 0, 1);
+  const peak = Math.pow(peakRatio, STEM_BAR_PEAK_EXPONENT) * (1 - normal);
+  return clamp(normal + peak, 0, 1);
 }
 
 function getInstrumentDisplayLevel(instrument, time, liveLevel = null) {
@@ -1837,13 +2896,8 @@ function getInstrumentDisplayLevel(instrument, time, liveLevel = null) {
   return timelineLevel;
 }
 
-function getInstrumentAudioLevel(instrument, time) {
-  return getInstrumentLevelFromCurve(instrument.curve, time);
-}
-
 function getInstrumentLevelFromCurve(curve, time) {
-  const times = state.analysis.timeline.times;
-  if (!times.length || !curve.length) return 0;
+  if (!state.analysis || !curve.length) return 0;
   const duration = state.analysis.file.duration || 1;
   const ratio = clamp(time / duration, 0, 1);
   const indexFloat = ratio * (curve.length - 1);
@@ -1863,9 +2917,15 @@ function seekToSlider() {
     state.offset = nextTime;
     startPlayback();
   } else {
-    updateRealtimeDisplay(nextTime);
+    if (state.mode === "original") {
+      setRealtimeMetersToZero(nextTime);
+    } else {
+      updateRealtimeDisplay(nextTime);
+      updateSoundFieldDisplay(nextTime, readSoundFieldScores(nextTime));
+    }
+    updateSpectrumDisplay(nextTime, { zero: true });
     drawWaveform(nextTime);
-    updateSeek(nextTime);
+    updateSeek(nextTime, { force: true });
   }
 }
 
@@ -1874,291 +2934,159 @@ function getPlaybackTime() {
   return clamp(state.audioContext.currentTime - state.startedAt, 0, state.audioBuffer ? state.audioBuffer.duration : 0);
 }
 
-function updateSeek(time) {
+function maybeUpdateSeek(time, options = {}) {
+  if (document.hidden && !options.force) return;
+  const quality = getRuntimeQualityProfile();
+  const interval = Number.isFinite(quality.seekInterval) ? quality.seekInterval : 1 / 12;
+  if (
+    options.force ||
+    state.lastSeekFrameTime < 0 ||
+    time < state.lastSeekFrameTime ||
+    time - state.lastSeekFrameTime >= interval
+  ) {
+    updateSeek(time, { force: true });
+  }
+}
+
+function updateSeek(time, options = {}) {
   const duration = state.analysis ? state.analysis.file.duration : 0;
-  refs.currentTime.textContent = formatTime(time);
-  refs.totalTime.textContent = formatTime(duration);
-  refs.seekSlider.value = duration ? Math.round((time / duration) * 1000) : 0;
+  setText(refs.currentTime, formatTime(time));
+  setText(refs.totalTime, formatTime(duration));
+  const sliderValue = String(duration ? Math.round((time / duration) * 1000) : 0);
+  if (refs.seekSlider.value !== sliderValue) {
+    refs.seekSlider.value = sliderValue;
+  }
+  if (options.force !== false) {
+    state.lastSeekFrameTime = time;
+  }
 }
 
 function drawWaveform(currentTime = 0) {
   const canvas = refs.waveformCanvas;
-  const ctx = canvas.getContext("2d");
+  const ctx = getWaveformContext(canvas);
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
   const width = Math.max(1, Math.floor(rect.width * dpr));
   const height = Math.max(1, Math.floor(rect.height * dpr));
-  if (canvas.width !== width || canvas.height !== height) {
+  const resized = canvas.width !== width || canvas.height !== height || state.waveformCache.dpr !== dpr;
+  if (resized) {
     canvas.width = width;
     canvas.height = height;
+    state.waveformCache.width = width;
+    state.waveformCache.height = height;
+    state.waveformCache.dpr = dpr;
+    state.waveformCache.backgroundKey = "";
+    state.waveformCache.barsKey = "";
+    state.waveformCache.gradientKey = "";
   }
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = cssColor("--canvas-bg", "rgba(238,244,240,0.78)");
-  ctx.fillRect(0, 0, width, height);
 
   if (!state.analysis || !state.analysis.waveform.length) {
-    drawEmptyWaveform();
+    drawEmptyWaveform(ctx, width, height, dpr);
     return;
   }
 
-  const values = state.analysis.waveform;
-  const mid = height * 0.5;
-  const maxAmp = height * 0.42;
-  const gradient = ctx.createLinearGradient(0, 0, width, 0);
-  gradient.addColorStop(0, cssColor("--green", "#687f5b"));
-  gradient.addColorStop(0.48, cssColor("--blue", "#517f96"));
-  gradient.addColorStop(1, cssColor("--coral", "#c86f5a"));
-  ctx.fillStyle = gradient;
-
-  values.forEach((value, index) => {
-    const x = (index / values.length) * width;
-    const barWidth = Math.max(1, width / values.length);
-    const h = Math.max(1, value * maxAmp);
-    ctx.fillRect(x, mid - h, barWidth, h * 2);
-  });
+  ctx.drawImage(getWaveformBaseCanvas(width, height, dpr), 0, 0);
 
   const cursor = state.analysis.file.duration ? (currentTime / state.analysis.file.duration) * width : 0;
   ctx.fillStyle = cssColor("--ink", "rgba(32,41,51,0.82)");
   ctx.fillRect(cursor, 0, Math.max(2, dpr * 2), height);
 }
 
-function drawEmptyWaveform() {
-  const canvas = refs.waveformCanvas;
-  const ctx = canvas.getContext("2d");
-  const dpr = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  canvas.width = Math.max(1, Math.floor(rect.width * dpr));
-  canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+function getWaveformContext(canvas) {
+  if (!state.waveformContext) {
+    state.waveformContext = canvas.getContext("2d");
+  }
+  return state.waveformContext;
+}
+
+function resetWaveformCache() {
+  state.waveformCache.backgroundKey = "";
+  state.waveformCache.backgroundCanvas = null;
+  state.waveformCache.barsKey = "";
+  state.waveformCache.bars = [];
+  state.waveformCache.gradientKey = "";
+  state.waveformCache.gradient = null;
+}
+
+function getWaveformBaseCanvas(width, height, dpr) {
+  const values = state.analysis?.waveform || [];
+  const theme = document.documentElement.dataset.theme || "light";
+  const key = `${width}:${height}:${dpr}:${theme}:${values.length}`;
+  if (!state.waveformCache.backgroundCanvas || state.waveformCache.backgroundKey !== key) {
+    const background = document.createElement("canvas");
+    background.width = width;
+    background.height = height;
+    const context = background.getContext("2d");
+    drawWaveformBaseLayer(context, width, height, values);
+    state.waveformCache.backgroundKey = key;
+    state.waveformCache.backgroundCanvas = background;
+  }
+  return state.waveformCache.backgroundCanvas;
+}
+
+function drawWaveformBaseLayer(ctx, width, height, values) {
+  ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = cssColor("--canvas-bg", "rgba(238,244,240,0.78)");
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = cssColor("--line", "rgba(32,41,51,0.18)");
-  ctx.fillRect(0, canvas.height / 2, canvas.width, Math.max(1, dpr));
-}
-
-function updateAutoRemasterAutomation(time = 0, options = {}) {
-  if (!state.analysis || !state.settings.remaster) return;
-  const features = readLiveOutputFeatures() || getFallbackRemasterFeatures(time);
-  const section = getSectionAtTime(time);
-  const targets = getAutoRemasterTargets(features, section);
-  const smoothing = options.force || !state.playing ? 1 : 0.11;
-
-  Object.entries(targets).forEach(([key, target]) => {
-    const current = Number.isFinite(state.autoRemasterValues[key])
-      ? state.autoRemasterValues[key]
-      : state.settings[key];
-    const next = current + (target - current) * smoothing;
-    state.autoRemasterValues[key] = next;
-    setAutomatedSetting(key, next);
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = getWaveformGradient(ctx, width);
+  getWaveformBars(values, width, height).forEach((bar) => {
+    ctx.fillRect(bar.x, bar.y, bar.width, bar.height);
   });
-
-  updateLiveGraphSettings();
 }
 
-function readLiveOutputFeatures() {
-  const graph = state.graph;
-  if (!graph || !graph.analyser || !graph.frequencyData || !graph.timeData || !state.audioContext) return null;
-  graph.analyser.getFloatFrequencyData(graph.frequencyData);
-  graph.analyser.getFloatTimeDomainData(graph.timeData);
-  return buildRealtimeRemasterFeatures(
-    graph.frequencyData,
-    graph.timeData,
-    state.audioContext.sampleRate
-  );
+function getWaveformGradient(ctx, width) {
+  const theme = document.documentElement.dataset.theme || "light";
+  const key = `${width}:${theme}`;
+  if (state.waveformCache.gradientKey !== key) {
+    const gradient = ctx.createLinearGradient(0, 0, width, 0);
+    gradient.addColorStop(0, cssColor("--green", "#687f5b"));
+    gradient.addColorStop(0.48, cssColor("--blue", "#517f96"));
+    gradient.addColorStop(1, cssColor("--coral", "#c86f5a"));
+    state.waveformCache.gradientKey = key;
+    state.waveformCache.gradient = gradient;
+  }
+  return state.waveformCache.gradient;
 }
 
-function buildRealtimeRemasterFeatures(frequencyData, timeData, sampleRate) {
-  let rms = 0;
-  let peak = 0;
-  for (let index = 0; index < timeData.length; index += 1) {
-    const sample = timeData[index];
-    rms += sample * sample;
-    peak = Math.max(peak, Math.abs(sample));
+function getWaveformBars(values, width, height) {
+  const key = `${width}:${height}:${values.length}`;
+  if (state.waveformCache.barsKey === key) {
+    return state.waveformCache.bars;
   }
-  rms = Math.sqrt(rms / Math.max(1, timeData.length));
-  const rmsDb = 20 * Math.log10(rms + 1e-7);
-  const peakDb = 20 * Math.log10(peak + 1e-7);
-  const crest = peak / Math.max(rms, 1e-6);
-
-  const binHz = (sampleRate / 2) / frequencyData.length;
-  let total = 0;
-  let centroidNumerator = 0;
-  const bands = { low: 0, lowMid: 0, mid: 0, presence: 0, air: 0 };
-  for (let index = 0; index < frequencyData.length; index += 1) {
-    const hz = index * binHz;
-    const amp = 10 ** ((Number.isFinite(frequencyData[index]) ? frequencyData[index] : -120) / 20);
-    const power = amp * amp;
-    total += power;
-    centroidNumerator += hz * power;
-    if (hz >= 40 && hz < 250) bands.low += power;
-    else if (hz < 800) bands.lowMid += power;
-    else if (hz < 3200) bands.mid += power;
-    else if (hz < 7600) bands.presence += power;
-    else if (hz < 14000) bands.air += power;
-  }
-  total = Math.max(total, 1e-12);
-  const centroid = centroidNumerator / total;
-  return {
-    rmsDb,
-    peakDb,
-    transient: clamp((crest - 1.8) / 6, 0, 1),
-    brightness: clamp((centroid - 520) / 5200, 0, 1),
-    low: bands.low / total,
-    lowMid: bands.lowMid / total,
-    mid: bands.mid / total,
-    presence: bands.presence / total,
-    air: bands.air / total,
-    energy: clamp((rmsDb + 46) / 34, 0, 1)
-  };
+  const mid = height * 0.5;
+  const maxAmp = height * 0.42;
+  const barWidth = Math.max(1, width / Math.max(1, values.length));
+  state.waveformCache.bars = values.map((value, index) => {
+    const h = Math.max(1, value * maxAmp);
+    return {
+      x: (index / values.length) * width,
+      y: mid - h,
+      width: barWidth,
+      height: h * 2
+    };
+  });
+  state.waveformCache.barsKey = key;
+  return state.waveformCache.bars;
 }
 
-function getFallbackRemasterFeatures(time) {
-  const section = getSectionAtTime(time);
-  const mix = state.analysis.mix;
-  const brightness = clamp((mix.centroidHz - 520) / 5200, 0, 1);
-  return {
-    rmsDb: mix.rmsDb,
-    peakDb: mix.peakDb,
-    transient: clamp((mix.crestDb - 6) / 16, 0, 1),
-    brightness,
-    low: clamp(0.34 - brightness * 0.18, 0.08, 0.42),
-    lowMid: 0.24,
-    mid: 0.28,
-    presence: clamp(brightness * 0.35, 0.06, 0.36),
-    air: clamp(brightness * 0.18, 0.02, 0.22),
-    energy: section ? section.energy : clamp((mix.rmsDb + 46) / 34, 0, 1)
-  };
-}
-
-function getAutoRemasterTargets(features, section) {
-  const sectionEnergy = section ? section.energy : features.energy;
-  const sectionDensity = section ? section.density : features.transient;
-  const sectionBrightness = section ? section.brightness : features.brightness;
-  const peakPressure = clamp((features.peakDb + 9) / 9, 0, 1);
-  const quietLift = clamp((-22 - features.rmsDb) / 20, 0, 1);
-  const highDetail = features.presence * 0.7 + features.air * 0.9;
-  const lowPressure = features.low + features.lowMid * 0.55;
-
-  return {
-    remasterAmount: clamp(0.52 + sectionEnergy * 0.23 + sectionDensity * 0.13 + quietLift * 0.08, 0.4, 0.94),
-    remasterTone: clamp((features.brightness - 0.38) * 0.52 + highDetail * 0.12 + lowPressure * 0.42, -0.2, 0.56),
-    remasterClarity: clamp(0.42 + features.brightness * 0.32 + features.transient * 0.18 + sectionDensity * 0.16 - lowPressure * 0.12, 0.32, 0.96),
-    remasterHeadroom: clamp(0.38 + peakPressure * 0.36 + features.transient * 0.16 + sectionDensity * 0.08, 0.34, 0.94),
-    width: clamp(1.42 + features.brightness * 0.12 + sectionBrightness * 0.1 + features.air * 0.08 - features.low * 0.02, 1.34, 1.76),
-    depth: clamp(1.48 + sectionEnergy * 0.18 + state.settings.room * 0.18 + (1 - features.transient) * 0.06, 1.32, 1.86)
-  };
-}
-
-function getSectionAtTime(time) {
-  if (!state.analysis || !Array.isArray(state.analysis.sections)) return null;
-  return state.analysis.sections.find((section) => time >= section.start && time <= section.end)
-    || state.analysis.sections[state.analysis.sections.length - 1]
-    || null;
-}
-
-function updateSetting(key, value) {
-  setSettingFromSliderValue(key, Number(value));
-  if (AUTO_REMASTER_KEYS.has(key)) {
-    state.autoRemasterValues[key] = state.settings[key];
-  }
-  updateLiveGraphSettings();
-}
-
-function setSettingFromSliderValue(key, numeric) {
-  if (key === "remasterTone") {
-    state.settings[key] = numeric / 50;
-    refs.sliderValues[key].textContent = `${numeric > 0 ? "+" : ""}${numeric}`;
-  } else {
-    state.settings[key] = numeric / 100;
-    refs.sliderValues[key].textContent = `${numeric}%`;
-  }
-}
-
-function setAutomatedSetting(key, value) {
-  const slider = refs.sliders[key];
-  if (!slider) return;
-  const min = Number(slider.min);
-  const max = Number(slider.max);
-  const sliderValue = key === "remasterTone"
-    ? clamp(Math.round(value * 50), min, max)
-    : clamp(Math.round(value * 100), min, max);
-  slider.value = String(sliderValue);
-  setSettingFromSliderValue(key, sliderValue);
-}
-
-function updateLiveGraphSettings() {
-  if (!state.graph || !state.audioContext) return;
-  const now = state.audioContext.currentTime;
-  if (state.graph.master) {
-    state.graph.master.gain.setTargetAtTime(state.settings.gain, now, 0.025);
-  }
-  if (state.graph.reverbGain) {
-    const reverbScale = state.graph.spatialMeters ? 0.2 : 0.18;
-    state.graph.reverbGain.gain.setTargetAtTime(state.settings.room * reverbScale, now, 0.035);
-  }
-  if (state.graph.earlyReflections) {
-    state.graph.earlyReflections.forEach((reflection) => {
-      if (reflection.kind === "hall") {
-        reflection.gain.gain.setTargetAtTime(state.settings.room * reflection.baseGain, now, 0.035);
-        setPannerPosition(reflection.panner, reflection.position, now);
-        return;
-      }
-      const bassTrim = reflection.stem.id === "bass" ? 0.2 : 1;
-      reflection.gain.gain.setTargetAtTime(state.settings.room * (0.024 + reflection.stem.send * 0.036) * bassTrim, now, 0.035);
-      setPannerPosition(reflection.panner, {
-        x: reflection.stem.position.x + reflection.side * (1.55 + state.settings.width * 0.48),
-        y: reflection.stem.position.y * 0.68 + (reflection.index > 1 ? 0.08 : 0),
-        z: reflection.stem.position.z - 0.82 - reflection.index * 0.18
-      }, now);
-    });
-  }
-  if (state.graph.stemPanners && state.graph.spatialObjects) {
-    state.graph.spatialObjects.forEach((object) => {
-      const panner = state.graph.stemPanners[object.id];
-      if (panner) setPannerPosition(panner, object.position, now);
-    });
-  }
-  if (state.graph.panners && state.analysis) {
-    state.analysis.instruments.forEach((instrument) => {
-      const panner = state.graph.panners[instrument.id];
-      if (panner) setPannerPosition(panner, instrument.position, now);
-    });
-  }
-  updateConcertHallSettings(now);
-  updateAutoRemasterControls(state.graph.remasterControls, now);
-}
-
-function ensureConcertHallLayer(graph) {
-  if (!state.audioContext || !graph || !graph.concertHallSource || !graph.concertHallOutput) {
-    return null;
-  }
-  if (!graph.concertHall) {
-    graph.concertHall = createConcertHallLayer(
-      state.audioContext,
-      graph.concertHallSource,
-      graph.concertHallOutput
-    );
-    if (Array.isArray(graph.nodes)) {
-      graph.nodes.push(...graph.concertHall.nodes);
+function drawEmptyWaveform(ctx = null, width = 0, height = 0, dpr = window.devicePixelRatio || 1) {
+  const canvas = refs.waveformCanvas;
+  const context = ctx || getWaveformContext(canvas);
+  let canvasWidth = width;
+  let canvasHeight = height;
+  if (!canvasWidth || !canvasHeight) {
+    const rect = canvas.getBoundingClientRect();
+    canvasWidth = Math.max(1, Math.floor(rect.width * dpr));
+    canvasHeight = Math.max(1, Math.floor(rect.height * dpr));
+    if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
+      canvas.width = canvasWidth;
+      canvas.height = canvasHeight;
     }
   }
-  return graph.concertHall;
-}
-
-function updateConcertHallSettings(time) {
-  if (!state.graph) return;
-  const layer = state.settings.concertHall
-    ? ensureConcertHallLayer(state.graph)
-    : state.graph.concertHall;
-  if (!layer) return;
-
-  const amount = getConcertHallAmount();
-  layer.send.gain.setTargetAtTime(amount, time, 0.04);
-  layer.reverbGain.gain.setTargetAtTime(amount * state.settings.room * 0.28, time, 0.055);
-  layer.reflectionBus.gain.setTargetAtTime(amount * 0.38, time, 0.04);
-  layer.reflections.forEach((reflection) => {
-    reflection.gain.gain.setTargetAtTime(amount * state.settings.room * reflection.baseGain, time, 0.05);
-    setPannerPosition(reflection.panner, reflection.position, time);
-  });
+  context.fillStyle = cssColor("--canvas-bg", "rgba(238,244,240,0.78)");
+  context.fillRect(0, 0, canvasWidth, canvasHeight);
+  context.fillStyle = cssColor("--line", "rgba(32,41,51,0.18)");
+  context.fillRect(0, canvasHeight / 2, canvasWidth, Math.max(1, dpr));
 }
 
 function resetApp() {
@@ -2167,34 +3095,45 @@ function resetApp() {
   state.analysis = null;
   state.audioBuffer = null;
   state.stemBuffers = null;
+  state.displayObjects = null;
   state.meterLevels = {};
+  state.metersZeroed = false;
+  state.fieldLevels = {};
+  state.fieldNodeGroups = {};
+  state.fieldDriftSeeds = {};
+  resetSpectrumState();
+  state.stemPositionCache = {};
+  state.stemDisplayPositions = {};
+  state.meterRows = {};
+  resetWaveformCache();
+  state.lastWaveformDrawTime = -1;
+  state.lastMeterFrameTime = -1;
+  state.lastStemDisplayFrameTime = -1;
+  state.lastFieldDisplayFrameTime = -1;
+  state.lastSpectrumFrameTime = -1;
+  state.lastSeekFrameTime = -1;
+  state.lastVisualFrameAt = 0;
+  resetLiveAnalysisCache();
+  resetRuntimeQualityState();
   state.liveScores = {};
-  state.autoRemasterValues = {
-    width: 1.45,
-    depth: 1.62,
-    remasterAmount: 0.82,
-    remasterTone: 0,
-    remasterClarity: 0.64,
-    remasterHeadroom: 0.62
-  };
-  state.settings.concertHall = false;
-  refs.concertHallToggle.checked = false;
-  refs.sliderValues.concertHall.textContent = "OFF";
+  state.spatialSettings = { ...SPATIAL_ENGINE_DEFAULTS };
+  state.spatialAnalysisSummary = { openness: 0, dynamics: 0, density: 0 };
   refs.fileInput.value = "";
+  syncFieldModeState();
+  updateSpatialControlUi();
   refs.trackKicker.textContent = "READY";
   refs.trackName.textContent = "파일을 선택하세요";
-  refs.trackSubtitle.textContent = "로컬 백엔드에서 분석하고 브라우저에서 공간 렌더링합니다.";
+  refs.trackSubtitle.textContent = "로컬 백엔드에서 분석하고 브라우저에서는 원본 출력 기준선을 유지합니다.";
   refs.playButton.disabled = true;
   refs.stopButton.disabled = true;
   refs.seekSlider.disabled = true;
   refs.instrumentList.innerHTML = "";
   refs.stageMap.innerHTML = "";
+  if (refs.spectrumStatus) refs.spectrumStatus.textContent = "Live analyser";
   refs.modelStack.innerHTML = "";
-  refs.remasterGrid.innerHTML = "";
   refs.sectionList.innerHTML = "";
   refs.activeCount.textContent = "0 active";
   refs.modelTag.textContent = "대기";
-  refs.remasterTag.textContent = "대기";
   refs.waveformTag.textContent = "대기";
   refs.currentTime.textContent = "0:00";
   refs.totalTime.textContent = "0:00";
@@ -2203,6 +3142,7 @@ function resetApp() {
   });
   document.body.classList.remove("has-analysis", "is-busy");
   drawEmptyWaveform();
+  drawSpectrumGraph(state.spectrumLevels, { zero: true, force: true });
   setBusy(false, "분석 대기 중");
 }
 
@@ -2224,7 +3164,10 @@ function applyTheme(theme) {
   refs.themeToggle.setAttribute("aria-pressed", String(isDark));
   refs.themeToggle.setAttribute("aria-label", isDark ? "라이트 모드로 전환" : "다크 모드로 전환");
   refs.themeToggleText.textContent = isDark ? "Light" : "Dark";
+  state.spectrumCache.backgroundKey = "";
+  state.spectrumCache.gradientKey = "";
   drawWaveform(getPlaybackTime());
+  drawSpectrumGraph(state.spectrumLevels, { time: getPlaybackTime(), zero: !state.playing, force: true });
 }
 
 function setBusy(isBusy, text) {
@@ -2239,49 +3182,79 @@ function showToast(message) {
   showToast.timer = window.setTimeout(() => refs.toast.classList.remove("is-visible"), 2800);
 }
 
-function mapRange(value, inMin, inMax, outMin, outMax) {
-  return outMin + ((value - inMin) / (inMax - inMin)) * (outMax - outMin);
+function setPerfPanelEnabled(enabled) {
+  state.perf.enabled = Boolean(enabled);
+  refs.perfPanel.hidden = !state.perf.enabled;
+  refs.perfToggle.classList.toggle("is-active", state.perf.enabled);
+  refs.perfToggle.setAttribute("aria-expanded", String(state.perf.enabled));
+  refs.perfToggle.setAttribute("aria-label", state.perf.enabled ? "성능 패널 닫기" : "성능 패널 열기");
+  if (state.perf.enabled) {
+    updatePerfPanel(performance.now(), { force: true });
+  }
 }
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
+function trackFrameTiming(now) {
+  if (!state.perf.lastFrameAt) {
+    state.perf.lastFrameAt = now;
+    return;
+  }
+  const delta = now - state.perf.lastFrameAt;
+  state.perf.lastFrameAt = now;
+  if (delta > 42) state.perf.droppedFrames += 1;
+  const instantFps = delta > 0 ? 1000 / delta : 0;
+  state.perf.fps = state.perf.fps
+    ? state.perf.fps * 0.86 + instantFps * 0.14
+    : instantFps;
 }
 
-function dbToGain(db) {
-  return 10 ** (Number(db || 0) / 20);
+function trackPerfSample(key, value) {
+  if (!Number.isFinite(value)) return;
+  const samples = state.perf[key];
+  if (!Array.isArray(samples)) return;
+  samples.push(value);
+  if (samples.length > 80) samples.shift();
 }
 
-function cssColor(name, fallback) {
-  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return value || fallback;
+function averagePerfSample(key) {
+  const samples = state.perf[key];
+  if (!Array.isArray(samples) || !samples.length) return 0;
+  return samples.reduce((sum, value) => sum + value, 0) / samples.length;
 }
 
-function formatTime(seconds) {
-  if (!Number.isFinite(seconds)) return "0:00";
-  const total = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(total / 60);
-  const secs = total % 60;
-  return `${minutes}:${String(secs).padStart(2, "0")}`;
+function updatePerfPanel(now = performance.now(), options = {}) {
+  if (!state.perf.enabled) return;
+  if (!options.force && now - state.perf.lastPanelAt < 500) return;
+  state.perf.lastPanelAt = now;
+  setText(refs.perf.fps, state.perf.fps ? `${Math.round(state.perf.fps)} fps` : "--");
+  setText(refs.perf.frame, `${averagePerfSample("frameMs").toFixed(1)} ms`);
+  setText(refs.perf.meter, `${averagePerfSample("meterMs").toFixed(1)} ms`);
+  setText(refs.perf.waveform, `${averagePerfSample("waveformMs").toFixed(1)} ms`);
+  setText(refs.perf.nodes, `${formatNumber(getLiveNodeCount())} · ${getRuntimeQualityProfile().label}`);
+  setText(refs.perf.heap, getHeapLabel());
 }
 
-function formatBytes(bytes) {
-  if (!bytes) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-  return `${(bytes / (1024 ** index)).toFixed(index ? 1 : 0)} ${units[index]}`;
+function getLiveNodeCount() {
+  if (!state.graph) return 0;
+  const graphNodes = Array.isArray(state.graph.nodes) ? state.graph.nodes.length : 0;
+  const retiredNodes = state.retiredGraphs.reduce((sum, item) => {
+    return sum + (Array.isArray(item.graph?.nodes) ? item.graph.nodes.length : 0);
+  }, 0);
+  return graphNodes + retiredNodes;
 }
 
-function formatNumber(value) {
-  return new Intl.NumberFormat("ko-KR").format(value);
+function getHeapLabel() {
+  const memory = performance.memory;
+  if (!memory || !Number.isFinite(memory.usedJSHeapSize)) return "--";
+  return formatBytes(memory.usedJSHeapSize);
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+function scheduleWaveformDraw() {
+  if (state.resizeFrame) return;
+  state.resizeFrame = requestAnimationFrame(() => {
+    state.resizeFrame = 0;
+    drawWaveform(getPlaybackTime());
+    drawSpectrumGraph(state.spectrumLevels, { time: getPlaybackTime(), zero: !state.playing, force: true });
+  });
 }
 
-window.addEventListener("resize", () => drawWaveform(getPlaybackTime()));
+window.addEventListener("resize", scheduleWaveformDraw);
