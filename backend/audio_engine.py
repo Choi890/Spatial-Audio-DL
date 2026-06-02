@@ -264,7 +264,8 @@ def analyze_audio(
     demucs_model: str = "htdemucs_ft",
     cache_key: str | None = None,
 ) -> dict[str, Any]:
-    # The backend produces one normalized payload consumed by the dashboard and export views.
+    # 업로드된 오디오를 분석해 프론트엔드가 바로 렌더링할 수 있는 표준 JSON payload를 만든다.
+    # 로드, 리샘플, STFT, 템포/키/믹스/악기 추정, Demucs 확인이 이 함수 안에서 순서대로 이어진다.
     y, source_sr = load_audio(input_path)
     if y.ndim == 1:
         channels = 1
@@ -380,7 +381,8 @@ def round_to_powerish(value: int) -> int:
 
 
 def run_nmf_instrument_model(samples: np.ndarray, hop_length: int, n_fft: int) -> dict[str, Any]:
-    # NMF separates recurring spectral patterns into instrument-like activity curves.
+    # NMF는 스펙트럼에서 반복되는 패턴을 분해해 악기 활동 곡선처럼 해석한다.
+    # 실제 악기 분리 모델이 아니라 빠른 fallback 분석이므로, 이후 refine 단계에서 RMS/onset/centroid로 보정한다.
     magnitude = stft_magnitude(samples, n_fft=n_fft, hop_length=hop_length)
     filterbank, mel_freqs = mel_filterbank(
         sample_rate=ANALYSIS_SR,
@@ -1085,7 +1087,8 @@ def inspect_demucs(
     cache_key: str | None = None,
     model: str = "htdemucs_ft",
 ) -> dict[str, Any]:
-    # Demucs is optional: return capability/status metadata even when separation is unavailable.
+    # Demucs stem 분리는 선택 기능이다.
+    # 설치되어 있지 않거나 실패해도 전체 분석 앱이 멈추지 않도록 상태, 사유, 캐시 여부만 payload에 담아 반환한다.
     allowed_models = {
         "htdemucs_ft": "Hybrid Transformer Demucs fine-tuned",
     }

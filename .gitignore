@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.idea/
 node_modules/
 test-results/
 playwright-report/

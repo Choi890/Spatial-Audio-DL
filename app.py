@@ -91,7 +91,8 @@ async def analyze(
 ) -> JSONResponse:
     # Keep the query parameter compatible with older pages, but run only the fine-tuned model.
     demucs_model = DEMUCS_MODEL
-    # Cache identity includes the profile version so analysis changes do not reuse stale output.
+    # 요청 본문과 분석 프로파일 버전을 함께 해시해 캐시 키를 만든다.
+    # 분석 알고리즘이 바뀌면 같은 파일이어도 이전 결과를 재사용하지 않도록 프로파일 문자열을 포함한다.
     maybe_prune_workspace_storage()
     body = await request.body()
     if not body:
@@ -131,7 +132,8 @@ def sanitize_filename(filename: str) -> str:
 
 def maybe_prune_workspace_storage(force: bool = False) -> None:
     global _last_workspace_cleanup
-    # Cleanup is rate-limited because requests can arrive often while users compare uploads.
+    # 업로드/출력 폴더 정리는 너무 자주 돌면 요청 처리 시간을 늘릴 수 있다.
+    # 그래서 일정 시간 간격이 지났거나 startup force일 때만 오래된 작업 폴더를 지운다.
     now = time.time()
     if not force and now - _last_workspace_cleanup < WORKSPACE_CLEANUP_INTERVAL_SECONDS:
         return
@@ -141,7 +143,8 @@ def maybe_prune_workspace_storage(force: bool = False) -> None:
 
 
 def prune_child_dirs(root: Path, max_age_seconds: int, skip_names: set[str] | None = None) -> None:
-    # Resolve each child under the intended root before deleting any generated workspace data.
+    # 삭제 대상은 반드시 root 아래의 하위 디렉터리인지 resolve로 확인한다.
+    # 분석 결과 정리 코드가 실수로 프로젝트 밖 경로를 지우지 않게 하는 안전장치다.
     if not root.exists():
         return
     skip_names = skip_names or set()
