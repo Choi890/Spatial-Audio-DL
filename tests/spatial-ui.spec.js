@@ -87,6 +87,31 @@ test("renders mocked analysis after file selection without moving the top cards"
   expect(errors()).toEqual([]);
 });
 
+test("keeps analysis visible when browser audio decoding fails", async ({ page }, testInfo) => {
+  const errors = collectBrowserErrors(page);
+  await page.route("**/api/analyze?**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createAnalysisFixture())
+    });
+  });
+
+  await page.goto("/");
+  const filePath = testInfo.outputPath("unsupported.aiff");
+  fs.writeFileSync(filePath, Buffer.from("not a browser-decodable audio file"));
+  await page.locator("#audio-file").setInputFiles(filePath);
+
+  await expect(page.locator("#status-text")).toHaveText("분석 완료 · 브라우저 디코딩 불가");
+  await expect(page.locator("#track-name")).toHaveText("tone.wav");
+  await expect(page.locator("#active-count")).toHaveText("3 active");
+  await expect(page.locator("#play-button")).toBeDisabled();
+  await expect(page.locator("#stop-button")).toBeDisabled();
+  await expect(page.locator("#seek-slider")).toBeDisabled();
+
+  expect(errors()).toEqual([]);
+});
+
 test("renders Demucs stems with inferred stage positions", async ({ page }, testInfo) => {
   const errors = collectBrowserErrors(page);
   await page.route("**/api/analyze?**", async (route) => {

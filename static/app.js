@@ -461,28 +461,41 @@ async function analyzeFile(file) {
   try {
     const context = await ensureAudioContext();
     resetRuntimeQualityState();
-    const decodePromise = file.arrayBuffer().then((buffer) => context.decodeAudioData(buffer.slice(0)));
+    const decodePromise = decodeBrowserAudioFile(file, context);
     const analyzePromise = postAudioForAnalysis(file);
-    const [audioBuffer, analysis] = await Promise.all([
+    const [decodeResult, analysisResult] = await Promise.allSettled([
       decodePromise,
       analyzePromise
     ]);
+
+    if (analysisResult.status === "rejected") {
+      throw analysisResult.reason;
+    }
+
+    const analysis = analysisResult.value;
+    const audioBuffer = decodeResult.status === "fulfilled" ? decodeResult.value : null;
+    const browserDecodeError = decodeResult.status === "rejected" ? decodeResult.reason : null;
 
     state.audioBuffer = audioBuffer;
     state.analysis = analysis;
     updateSpatialSettingsFromAnalysis(analysis);
     const separator = analysis.models.deepSeparator;
-    if (separator.status === "completed") {
+    if (separator.status === "completed" && audioBuffer) {
       setBusy(true, separator.cached ? "캐시된 stem 디코딩 중" : "분리된 stem 디코딩 중");
       state.stemBuffers = await loadStemBuffers(context, analysis);
     }
     setBusy(true, "재설계용 원본 출력 경로 준비 중");
     state.offset = 0;
     renderAnalysis(analysis);
-    refs.playButton.disabled = false;
-    refs.stopButton.disabled = false;
-    refs.seekSlider.disabled = false;
+    refs.playButton.disabled = !audioBuffer;
+    refs.stopButton.disabled = !audioBuffer;
+    refs.seekSlider.disabled = !audioBuffer;
     document.body.classList.add("has-analysis");
+    if (browserDecodeError) {
+      setBusy(false, "분석 완료 · 브라우저 디코딩 불가");
+      showToast(getBrowserDecodeMessage(file, browserDecodeError));
+      return;
+    }
     setBusy(false, state.stemBuffers
       ? (separator.cached ? "캐시 기반 분석 준비 완료" : "Demucs 분석 준비 완료")
       : "원본 분석 완료");
@@ -491,9 +504,38 @@ async function analyzeFile(file) {
       : "원본 기준선 분석이 완료됐습니다.");
   } catch (error) {
     console.error(error);
-    setBusy(false, "분석 실패");
+    setBusy(false, getAnalysisFailureStatus(error));
     showToast(error.message || "분석 중 오류가 발생했습니다.");
   }
+}
+
+async function decodeBrowserAudioFile(file, context) {
+  try {
+    const buffer = await file.arrayBuffer();
+    return await context.decodeAudioData(buffer.slice(0));
+  } catch (error) {
+    const wrapped = new Error(error && error.message ? error.message : "Unable to decode audio data");
+    wrapped.cause = error;
+    throw wrapped;
+  }
+}
+
+function getBrowserDecodeMessage(file, error) {
+  const type = file.type || "알 수 없는 형식";
+  const name = file.name || "audio";
+  const detail = error && error.message ? ` (${error.message})` : "";
+  return `백엔드 분석은 완료됐지만 브라우저가 ${name} 파일을 재생용으로 디코딩하지 못했습니다. 형식: ${type}${detail}`;
+}
+
+function getAnalysisFailureStatus(error) {
+  const message = String(error && error.message ? error.message : "");
+  if (/Failed to fetch|NetworkError|Network request failed|Load failed/i.test(message)) {
+    return "서버 연결 실패";
+  }
+  if (/No audio body|too large|Analysis failed|분석 요청 실패/i.test(message)) {
+    return "분석 실패";
+  }
+  return "분석 실패";
 }
 
 async function postAudioForAnalysis(file) {
@@ -502,13 +544,20 @@ async function postAudioForAnalysis(file) {
     demucs: "true",
     demucs_model: DEMUCS_MODEL
   });
-  const response = await fetch(apiPath(`/api/analyze?${params.toString()}`), {
-    method: "POST",
-    headers: {
-      "Content-Type": file.type || "application/octet-stream"
-    },
-    body: file
-  });
+  let response;
+  try {
+    response = await fetch(apiPath(`/api/analyze?${params.toString()}`), {
+      method: "POST",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream"
+      },
+      body: file
+    });
+  } catch (error) {
+    const wrapped = new Error("백엔드 서버에 연결할 수 없습니다. start.ps1을 실행한 뒤 http://127.0.0.1:8766/에서 다시 시도하세요.");
+    wrapped.cause = error;
+    throw wrapped;
+  }
   if (!response.ok) {
     let message = `분석 요청 실패 (${response.status})`;
     try {
