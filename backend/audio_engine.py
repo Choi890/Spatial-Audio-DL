@@ -264,6 +264,7 @@ def analyze_audio(
     demucs_model: str = "htdemucs_ft",
     cache_key: str | None = None,
 ) -> dict[str, Any]:
+    # The backend produces one normalized payload consumed by the dashboard and export views.
     y, source_sr = load_audio(input_path)
     if y.ndim == 1:
         channels = 1
@@ -379,6 +380,7 @@ def round_to_powerish(value: int) -> int:
 
 
 def run_nmf_instrument_model(samples: np.ndarray, hop_length: int, n_fft: int) -> dict[str, Any]:
+    # NMF separates recurring spectral patterns into instrument-like activity curves.
     magnitude = stft_magnitude(samples, n_fft=n_fft, hop_length=hop_length)
     filterbank, mel_freqs = mel_filterbank(
         sample_rate=ANALYSIS_SR,
@@ -1083,6 +1085,7 @@ def inspect_demucs(
     cache_key: str | None = None,
     model: str = "htdemucs_ft",
 ) -> dict[str, Any]:
+    # Demucs is optional: return capability/status metadata even when separation is unavailable.
     allowed_models = {
         "htdemucs_ft": "Hybrid Transformer Demucs fine-tuned",
     }

@@ -91,6 +91,7 @@ async def analyze(
 ) -> JSONResponse:
     # Keep the query parameter compatible with older pages, but run only the fine-tuned model.
     demucs_model = DEMUCS_MODEL
+    # Cache identity includes the profile version so analysis changes do not reuse stale output.
     maybe_prune_workspace_storage()
     body = await request.body()
     if not body:
@@ -130,6 +131,7 @@ def sanitize_filename(filename: str) -> str:
 
 def maybe_prune_workspace_storage(force: bool = False) -> None:
     global _last_workspace_cleanup
+    # Cleanup is rate-limited because requests can arrive often while users compare uploads.
     now = time.time()
     if not force and now - _last_workspace_cleanup < WORKSPACE_CLEANUP_INTERVAL_SECONDS:
         return
@@ -139,6 +141,7 @@ def maybe_prune_workspace_storage(force: bool = False) -> None:
 
 
 def prune_child_dirs(root: Path, max_age_seconds: int, skip_names: set[str] | None = None) -> None:
+    # Resolve each child under the intended root before deleting any generated workspace data.
     if not root.exists():
         return
     skip_names = skip_names or set()
